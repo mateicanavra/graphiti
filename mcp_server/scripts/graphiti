@@ -6,11 +6,12 @@ usage() {
   echo "Usage: graphiti [-h|--help] [COMMAND] [ARGS...]"
   echo
   echo "Commands:"
+  echo "  init PROJECT_NAME [DIR]        Initialize a project: run link-dev-files and setup-rules."
   echo "  add-entities SET_NAME          Create a new entity type set with an example entity in the mcp-graphiti repo."
   echo "  setup-rules PROJECT_NAME [DIR] Setup Cursor rules (.mdc files) for Graphiti in a target project directory."
   echo "  link-dev-files [DIR]           (Default if no command) Create dev symlinks (entity_types, docker-compose.yml)."
   echo
-  echo "Arguments for setup-rules:"
+  echo "Arguments for init & setup-rules:"
   echo "  PROJECT_NAME  Name of the target project (used for schema filename)."
   echo "  DIR           Optional. Target project root directory. Defaults to current directory (.)."
   echo
@@ -43,6 +44,85 @@ set_name_to_class_name() {
   echo "${class_name}Entity"
 }
 
+# --- Helper Function for Linking Dev Files ---
+_link_dev_files() {
+  local TARGET_DIR="${1:-.}" # Default to current directory if not provided
+  mkdir -p "$TARGET_DIR" # Ensure target directory exists
+
+  # Define Source and Target Paths for dev links
+  local SOURCE_ENTITY_TYPES="$SOURCE_SERVER_DIR/entity_types"
+  local TARGET_ENTITY_TYPES="$TARGET_DIR/entity_types"
+  local SOURCE_DOCKER_COMPOSE="$SOURCE_SERVER_DIR/docker-compose.yml"
+  local TARGET_DOCKER_COMPOSE="$TARGET_DIR/docker-compose.yml"
+
+  # Create/Update Symlinks for dev files
+  echo "Linking entity types to $TARGET_ENTITY_TYPES"
+  ln -sf "$SOURCE_ENTITY_TYPES" "$TARGET_ENTITY_TYPES"
+
+  echo "Linking docker-compose.yml to $TARGET_DOCKER_COMPOSE"
+  ln -sf "$SOURCE_DOCKER_COMPOSE" "$TARGET_DOCKER_COMPOSE"
+
+  echo "Graphiti dev links created successfully in $TARGET_DIR."
+}
+
+# --- Helper Function for Setting Up Rules ---
+_setup_rules() {
+  local PROJECT_NAME="$1"
+  local TARGET_DIR="${2:-.}" # Default target directory to current if not provided
+
+  # Validate PROJECT_NAME format (optional, but good practice)
+  if ! [[ "$PROJECT_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "Error: Invalid PROJECT_NAME. Use only letters, numbers, underscores, and hyphens."
+    exit 1
+  fi
+
+  # Define paths
+  local CURSOR_RULES_DIR="$TARGET_DIR/.cursor/rules/graphiti"
+  local SOURCE_CORE_RULE="$SOURCE_SERVER_DIR/rules/graphiti-mcp-core-rules.md"
+  local SOURCE_MAINT_RULE="$SOURCE_SERVER_DIR/rules/graphiti-knowledge-graph-maintenance.md"
+  local TARGET_CORE_RULE_LINK="$CURSOR_RULES_DIR/graphiti-mcp-core-rules.mdc"
+  local TARGET_MAINT_RULE_LINK="$CURSOR_RULES_DIR/graphiti-knowledge-graph-maintenance.mdc"
+  local TARGET_SCHEMA_FILE="$CURSOR_RULES_DIR/graphiti-$PROJECT_NAME-schema.mdc"
+  local SCHEMA_TEMPLATE_FILE="$SOURCE_SERVER_DIR/rules/templates/project_schema_template.md"
+
+  echo "Setting up Graphiti Cursor rules for project '$PROJECT_NAME' in $TARGET_DIR"
+
+  # Create target directory
+  mkdir -p "$CURSOR_RULES_DIR"
+  echo "Created rules directory: $CURSOR_RULES_DIR"
+
+  # Check source files exist before linking/generating
+  if [ ! -f "$SOURCE_CORE_RULE" ]; then
+    echo "Error: Source rule file not found: $SOURCE_CORE_RULE"
+    exit 1
+  fi
+  if [ ! -f "$SOURCE_MAINT_RULE" ]; then
+    echo "Error: Source rule file not found: $SOURCE_MAINT_RULE"
+    exit 1
+  fi
+  if [ ! -f "$SCHEMA_TEMPLATE_FILE" ]; then
+    echo "Error: Schema template file not found: $SCHEMA_TEMPLATE_FILE"
+    exit 1
+  fi
+
+  # Create symlinks
+  echo "Linking core rule: $TARGET_CORE_RULE_LINK -> $SOURCE_CORE_RULE"
+  ln -sf "$SOURCE_CORE_RULE" "$TARGET_CORE_RULE_LINK"
+
+  echo "Linking maintenance rule: $TARGET_MAINT_RULE_LINK -> $SOURCE_MAINT_RULE"
+  ln -sf "$SOURCE_MAINT_RULE" "$TARGET_MAINT_RULE_LINK"
+
+  # Generate template project schema file from template (.md -> .mdc)
+  if [ -e "$TARGET_SCHEMA_FILE" ]; then
+    echo "Warning: Project schema file already exists, skipping template generation: $TARGET_SCHEMA_FILE"
+  else
+    echo "Generating template project schema file: $TARGET_SCHEMA_FILE"
+    sed "s/__PROJECT_NAME__/$PROJECT_NAME/g" "$SCHEMA_TEMPLATE_FILE" > "$TARGET_SCHEMA_FILE"
+  fi
+
+  echo "Graphiti Cursor rules setup complete for project '$PROJECT_NAME'."
+}
+
 # Check for help flag
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
   usage
@@ -62,12 +142,31 @@ if [ ! -d "$SOURCE_SERVER_DIR" ]; then
   exit 1
 fi
 
-# 2. Check for commands
-COMMAND="$1"
-shift # Remove command from arguments list
+# 2. Parse command and arguments
+COMMAND="${1:-link-dev-files}" # Default to link-dev-files if no command provided
+shift || true # Shift arguments even if $1 was empty (no command given). Use || true to prevent exit on error if no args.
 
-# Handle add-entities command
-if [[ "$COMMAND" == "add-entities" ]]; then
+# Handle commands using if/elif/else structure
+if [[ "$COMMAND" == "init" ]]; then
+  PROJECT_NAME="$1"
+  TARGET_DIR="${2:-.}" # Default target directory to current if not provided
+
+  if [ -z "$PROJECT_NAME" ]; then
+    echo "Error: Missing PROJECT_NAME argument for init command."
+    echo "Usage: graphiti init PROJECT_NAME [TARGET_DIRECTORY]"
+    exit 1
+  fi
+
+  echo "Initializing Graphiti project '$PROJECT_NAME' in '$TARGET_DIR'..."
+
+  # Call the helper functions
+  _link_dev_files "$TARGET_DIR"
+  _setup_rules "$PROJECT_NAME" "$TARGET_DIR"
+
+  echo "Graphiti project '$PROJECT_NAME' initialization complete."
+  exit 0
+
+elif [[ "$COMMAND" == "add-entities" ]]; then
   # Get SET_NAME from first remaining argument
   SET_NAME="$1"
   
@@ -137,91 +236,28 @@ EOF
   echo "Entity set '$SET_NAME' successfully created."
   exit 0
 
-# Handle setup-rules command
 elif [[ "$COMMAND" == "setup-rules" ]]; then
   PROJECT_NAME="$1"
   TARGET_DIR="${2:-.}" # Default target directory to current if not provided
 
   if [ -z "$PROJECT_NAME" ]; then
-    echo "Error: Missing PROJECT_NAME argument."
+    echo "Error: Missing PROJECT_NAME argument for setup-rules command."
     echo "Usage: graphiti setup-rules PROJECT_NAME [TARGET_DIRECTORY]"
     exit 1
   fi
 
-  # Validate PROJECT_NAME format (optional, but good practice)
-  if ! [[ "$PROJECT_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    echo "Error: Invalid PROJECT_NAME. Use only letters, numbers, underscores, and hyphens."
-    exit 1
-  fi
-
-  # Define paths - Updated Source Paths
-  CURSOR_RULES_DIR="$TARGET_DIR/.cursor/rules/graphiti"
-  SOURCE_CORE_RULE="$SOURCE_SERVER_DIR/rules/graphiti-mcp-core-rules.md" # Updated path
-  SOURCE_MAINT_RULE="$SOURCE_SERVER_DIR/rules/graphiti-knowledge-graph-maintenance.md" # Updated path
-  TARGET_CORE_RULE_LINK="$CURSOR_RULES_DIR/graphiti-mcp-core-rules.mdc"
-  TARGET_MAINT_RULE_LINK="$CURSOR_RULES_DIR/graphiti-knowledge-graph-maintenance.mdc"
-  TARGET_SCHEMA_FILE="$CURSOR_RULES_DIR/graphiti-$PROJECT_NAME-schema.mdc" # Target file has .mdc extension
-  SCHEMA_TEMPLATE_FILE="$SOURCE_SERVER_DIR/rules/templates/project_schema_template.md" # Updated path, source is .md
-
-  echo "Setting up Graphiti Cursor rules for project '$PROJECT_NAME' in $TARGET_DIR"
-
-  # Create target directory
-  mkdir -p "$CURSOR_RULES_DIR"
-  echo "Created rules directory: $CURSOR_RULES_DIR"
-
-  # Create symlinks (ensure source files exist)
-  if [ ! -f "$SOURCE_CORE_RULE" ]; then
-    echo "Error: Source rule file not found: $SOURCE_CORE_RULE"
-    exit 1
-  fi
-  if [ ! -f "$SOURCE_MAINT_RULE" ]; then
-    echo "Error: Source rule file not found: $SOURCE_MAINT_RULE"
-    exit 1
-  fi
-
-  echo "Linking core rule: $TARGET_CORE_RULE_LINK -> $SOURCE_CORE_RULE"
-  ln -sf "$SOURCE_CORE_RULE" "$TARGET_CORE_RULE_LINK"
-
-  echo "Linking maintenance rule: $TARGET_MAINT_RULE_LINK -> $SOURCE_MAINT_RULE"
-  ln -sf "$SOURCE_MAINT_RULE" "$TARGET_MAINT_RULE_LINK"
-
-  # Generate template project schema file from template (.md -> .mdc)
-  if [ -e "$TARGET_SCHEMA_FILE" ]; then
-    echo "Warning: Project schema file already exists, skipping template generation: $TARGET_SCHEMA_FILE"
-  elif [ ! -f "$SCHEMA_TEMPLATE_FILE" ]; then # Check if template exists
-    echo "Error: Schema template file not found: $SCHEMA_TEMPLATE_FILE"
-    # Optionally create a fallback minimal file or exit
-    exit 1
-  else
-    echo "Generating template project schema file: $TARGET_SCHEMA_FILE"
-    # Read template (.md), replace placeholder, and write to target (.mdc)
-    sed "s/__PROJECT_NAME__/$PROJECT_NAME/g" "$SCHEMA_TEMPLATE_FILE" > "$TARGET_SCHEMA_FILE"
-  fi
-
-  echo "Graphiti Cursor rules setup complete for project '$PROJECT_NAME'."
+  # Call the helper function (validation is inside the helper)
+  _setup_rules "$PROJECT_NAME" "$TARGET_DIR"
   exit 0
 
-# Handle link-dev-files command or default behavior
-elif [[ "$COMMAND" == "link-dev-files" || -z "$COMMAND" ]]; then
+elif [[ "$COMMAND" == "link-dev-files" ]]; then
   # Determine Target Directory for dev links
-  TARGET_DIR="${1:-.}" # Use first arg after 'link-dev-files', or default to '.' if no command/args
-  mkdir -p "$TARGET_DIR" # Ensure target directory exists
+  TARGET_DIR="${1:-.}" # Use first arg after 'link-dev-files' or default to '.' if no command/args
 
-  # Define Source and Target Paths for dev links
-  SOURCE_ENTITY_TYPES="$SOURCE_SERVER_DIR/entity_types"
-  TARGET_ENTITY_TYPES="$TARGET_DIR/entity_types"
-  SOURCE_DOCKER_COMPOSE="$SOURCE_SERVER_DIR/docker-compose.yml"
-  TARGET_DOCKER_COMPOSE="$TARGET_DIR/docker-compose.yml"
-
-  # Create/Update Symlinks for dev files
-  echo "Linking entity types to $TARGET_ENTITY_TYPES"
-  ln -sf "$SOURCE_ENTITY_TYPES" "$TARGET_ENTITY_TYPES"
-
-  echo "Linking docker-compose.yml to $TARGET_DOCKER_COMPOSE"
-  ln -sf "$SOURCE_DOCKER_COMPOSE" "$TARGET_DOCKER_COMPOSE"
-
-  echo "Graphiti dev links created successfully in $TARGET_DIR."
+  # Call the helper function
+  _link_dev_files "$TARGET_DIR"
   exit 0
+
 else
   echo "Error: Unknown command '$COMMAND'"
   usage
