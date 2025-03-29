@@ -1,0 +1,12 @@
+{
+	"mcpServers": {
+		"graphiti-magic-api": {
+			"transport": "sse",
+			"url": "http://localhost:8000/sse"
+		},
+		"graphiti-civ7": {
+			"transport": "sse",
+			"url": "http://localhost:8001/sse"
+		}
+	}
+}

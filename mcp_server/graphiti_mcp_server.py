@@ -282,6 +282,16 @@ async def initialize_graphiti(llm_client: Optional[LLMClient] = None, destroy_gr
     await graphiti_client.build_indices_and_constraints()
     logger.info('Graphiti client initialized successfully')
 
+    # NEW: Only build indices if we haven't explicitly told it to skip
+    # skip_db_init = os.environ.get("SKIP_DB_INIT", "false").lower() == "true"
+    # if not skip_db_init:
+    #     logger.info("Building indices and constraints...")
+    #     await graphiti_client.build_indices_and_constraints()
+    #     logger.info('Graphiti client initialized successfully (with indices).')
+    # else:
+    #     logger.info('SKIP_DB_INIT=true -> Skipping index creation.')
+    #     logger.info('Graphiti client connected successfully, but did NOT build indices.')
+
 
 def format_fact_result(edge: EntityEdge) -> dict[str, Any]:
     """Format an entity edge into a readable result.
@@ -341,7 +351,6 @@ async def process_episode_queue(group_id: str):
     finally:
         queue_workers[group_id] = False
         logger.info(f'Stopped episode queue worker for group_id: {group_id}')
-
 
 @mcp.tool()
 async def add_episode(
@@ -806,6 +815,16 @@ async def get_status() -> StatusResponse:
             'status': 'error',
             'message': f'Graphiti MCP server is running but Neo4j connection failed: {error_msg}',
         }
+
+
+@mcp.resource('http://graphiti/health')
+async def health_check() -> dict[str, str]:
+    """Simple health check endpoint for the Graphiti MCP server.
+    
+    Returns a 200 OK response if the server is running, regardless of Neo4j connection.
+    This allows for lightweight monitoring and container orchestration health checks.
+    """
+    return {'status': 'ok'}
 
 
 def create_llm_client(api_key: Optional[str] = None, model: Optional[str] = None) -> LLMClient:
