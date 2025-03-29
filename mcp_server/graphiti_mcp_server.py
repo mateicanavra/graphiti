@@ -38,6 +38,8 @@ load_dotenv()
 DEFAULT_LLM_MODEL = 'gpt-4o'
 
 # The ENTITY_TYPES dictionary is managed by the registry in mcp_server.entity_types
+# NOTE: This global reference is only used for predefined entity subsets below.
+# For the latest entity types, always use get_entity_types() directly.
 ENTITY_TYPES = get_entity_types()
 
 # Predefined entity type sets for different use cases
@@ -123,12 +125,16 @@ class MCPConfig(BaseModel):
 
 
 # Configure logging
+log_level_str = os.environ.get('GRAPHITI_LOG_LEVEL', 'info').upper()
+log_level = getattr(logging, log_level_str, logging.INFO)
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     stream=sys.stderr,
 )
 logger = logging.getLogger(__name__)
+logger.info(f'Logging configured with level: {logging.getLevelName(log_level)}')
 
 # Create global config instance
 config = GraphitiConfig.from_env()
@@ -384,19 +390,32 @@ async def add_episode(
             try:
                 logger.info(f"Processing queued episode '{name}' for group_id: {group_id_str}")
                 
+                # Import here to ensure we get the most up-to-date entity registry
+                from entity_types import get_entity_types, get_entity_type_subset
+                
                 # Determine which entity types to use based on configuration and parameters
+                logger.info(f"Configuration settings - use_custom_entities: {config.use_custom_entities}, "
+                           f"entity_type_subset param: {entity_type_subset}, "
+                           f"config.entity_type_subset: {config.entity_type_subset}")
+                
                 if not config.use_custom_entities:
                     # If custom entities are disabled, use empty dict
                     entity_types_to_use = {}
+                    logger.info("Custom entities disabled, using empty entity type dictionary")
                 elif entity_type_subset:
                     # If a subset is specified in function call, it takes highest precedence
                     entity_types_to_use = get_entity_type_subset(entity_type_subset)
+                    logger.info(f"Using function parameter entity subset: {entity_type_subset}")
                 elif config.entity_type_subset:
                     # If subset is specified via command line, use that
                     entity_types_to_use = get_entity_type_subset(config.entity_type_subset)
+                    logger.info(f"Using command-line entity subset: {config.entity_type_subset}")
                 else:
-                    # Otherwise use all registered entity types
-                    entity_types_to_use = ENTITY_TYPES
+                    # Otherwise use all registered entity types - get fresh reference here
+                    entity_types_to_use = get_entity_types()
+                    logger.info(f"Using all registered entity types: {list(entity_types_to_use.keys())}")
+                
+                logger.info(f"Final entity types being used: {list(entity_types_to_use.keys())}")
 
                 await client.add_episode(
                     name=name,
@@ -862,6 +881,11 @@ async def initialize_server() -> MCPConfig:
         if config.use_custom_entities:
             logger.info('Using all registered entity types')
         
+    # Log all registered entity types after initialization
+    logger.info(f"All registered entity types after initialization: {len(get_entity_types())}")
+    for entity_name in get_entity_types().keys():
+        logger.info(f"  - Available entity: {entity_name}")
+
     llm_client = None
 
     # Create OpenAI client if model is specified or if OPENAI_API_KEY is available
@@ -915,13 +939,17 @@ def load_entity_types_from_directory(directory_path: str) -> None:
     Args:
         directory_path: Path to the directory containing entity type modules
     """
+    logger.info(f"Attempting to load entities from directory: {directory_path}")
     directory = Path(directory_path)
     if not directory.exists() or not directory.is_dir():
         logger.warning(f"Entity types directory {directory_path} does not exist or is not a directory")
         return
         
     # Find all Python files in the directory
-    for file_path in directory.glob('*.py'):
+    python_files = list(directory.glob('*.py'))
+    logger.info(f"Found {len(python_files)} Python files in {directory_path}")
+    
+    for file_path in python_files:
         if file_path.name.startswith('__'):
             continue  # Skip __init__.py and similar files
             
@@ -935,6 +963,9 @@ def load_entity_types_from_directory(directory_path: str) -> None:
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
                 
+                # Track how many entities were registered from this file
+                entities_registered = 0
+                
                 # Look for BaseModel classes in the module
                 for attribute_name in dir(module):
                     attribute = getattr(module, attribute_name)
@@ -947,11 +978,17 @@ def load_entity_types_from_directory(directory_path: str) -> None:
                         
                         # Register the entity type
                         register_entity_type(attribute_name, attribute)
+                        entities_registered += 1
                         logger.info(f"Auto-registered entity type: {attribute_name}")
                 
-                logger.info(f"Successfully loaded entity type module: {module_name}")
+                logger.info(f"Successfully loaded entity type module: {module_name} (registered {entities_registered} entities)")
         except Exception as e:
             logger.error(f"Error loading entity type module {module_name}: {str(e)}")
+    
+    # Log total registered entity types after loading this directory
+    logger.info(f"Total registered entity types after loading {directory_path}: {len(get_entity_types())}")
+    for entity_name in get_entity_types().keys():
+        logger.info(f"  - Registered entity: {entity_name}")
 
 
 if __name__ == '__main__':

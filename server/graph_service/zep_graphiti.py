@@ -19,11 +19,14 @@ class ZepGraphiti(Graphiti):
         super().__init__(uri, user, password, llm_client)
 
     async def save_entity_node(self, name: str, uuid: str, group_id: str, summary: str = ''):
+        # Ensure summary is never None
+        summary_value = '' if summary is None else summary
+        
         new_node = EntityNode(
             name=name,
             uuid=uuid,
             group_id=group_id,
-            summary=summary,
+            summary=summary_value,
         )
         await new_node.generate_name_embedding(self.embedder)
         await new_node.save(self.driver)

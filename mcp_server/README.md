@@ -213,6 +213,8 @@ The Graphiti MCP server exposes the following tools:
 - `clear_graph`: Clear all data from the knowledge graph and rebuild indices
 - `get_status`: Get the status of the Graphiti MCP server and Neo4j connection
 
+For detailed usage instructions, known issues, and best practices, see the [MCP Tools Usage Guide](./docs/MCP_TOOLS_USAGE.md).
+
 ## Working with JSON Data
 
 The Graphiti MCP server can process structured JSON data through the `add_episode` tool with `source="json"`. This allows you to automatically extract entities and relationships from structured data:

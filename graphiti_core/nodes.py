@@ -269,6 +269,10 @@ class EntityNode(Node):
         return self.name_embedding
 
     async def save(self, driver: AsyncDriver):
+        # Ensure summary is never None before saving
+        if self.summary is None:
+            self.summary = ""
+            
         entity_data: dict[str, Any] = {
             'uuid': self.uuid,
             'name': self.name,
@@ -514,6 +518,9 @@ def get_episodic_node_from_record(record: Any) -> EpisodicNode:
 
 
 def get_entity_node_from_record(record: Any) -> EntityNode:
+    # Add defensive check to ensure summary is never None
+    summary = record['summary'] if record['summary'] is not None else ""
+    
     entity_node = EntityNode(
         uuid=record['uuid'],
         name=record['name'],
@@ -521,7 +528,7 @@ def get_entity_node_from_record(record: Any) -> EntityNode:
         name_embedding=record['name_embedding'],
         labels=record['labels'],
         created_at=record['created_at'].to_native(),
-        summary=record['summary'],
+        summary=summary,  # Using the sanitized summary value
         attributes=record['attributes'],
     )
 

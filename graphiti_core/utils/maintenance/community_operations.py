@@ -128,8 +128,11 @@ def label_propagation(projection: dict[str, list[Neighbor]]) -> list[list[str]]:
 
 
 async def summarize_pair(llm_client: LLMClient, summary_pair: tuple[str, str]) -> str:
+    # Sanitize input to ensure no None values
+    safe_summaries = [summary if summary is not None else '' for summary in summary_pair]
+    
     # Prepare context for LLM
-    context = {'node_summaries': [{'summary': summary} for summary in summary_pair]}
+    context = {'node_summaries': [{'summary': summary} for summary in safe_summaries]}
 
     llm_response = await llm_client.generate_response(
         prompt_library.summarize_nodes.summarize_pair(context), response_model=Summary
@@ -156,7 +159,8 @@ async def generate_summary_description(llm_client: LLMClient, summary: str) -> s
 async def build_community(
     llm_client: LLMClient, community_cluster: list[EntityNode]
 ) -> tuple[CommunityNode, list[CommunityEdge]]:
-    summaries = [entity.summary for entity in community_cluster]
+    # Sanitize summaries to ensure no None values
+    summaries = [entity.summary if entity.summary is not None else '' for entity in community_cluster]
     length = len(summaries)
     while length > 1:
         odd_one_out: str | None = None
@@ -178,7 +182,7 @@ async def build_community(
         summaries = new_summaries
         length = len(summaries)
 
-    summary = summaries[0]
+    summary = summaries[0] if summaries and summaries[0] is not None else ''
     name = await generate_summary_description(llm_client, summary)
     now = utc_now()
     community_node = CommunityNode(
@@ -302,7 +306,11 @@ async def update_community(
     if community is None:
         return
 
-    new_summary = await summarize_pair(llm_client, (entity.summary, community.summary))
+    # Ensure entity summary and community summary are not None
+    entity_summary = entity.summary if entity.summary is not None else ''
+    community_summary = community.summary if community.summary is not None else ''
+    
+    new_summary = await summarize_pair(llm_client, (entity_summary, community_summary))
     new_name = await generate_summary_description(llm_client, new_summary)
 
     community.summary = new_summary

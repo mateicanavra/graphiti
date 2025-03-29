@@ -27,7 +27,8 @@ def get_entity_types() -> Dict[str, Type[BaseModel]]:
     Returns:
         A dictionary mapping entity type names to their Pydantic model classes
     """
-    return _ENTITY_REGISTRY.copy()
+    # Return the actual registry reference, not a copy
+    return _ENTITY_REGISTRY
 
 
 def get_entity_type_subset(names: list[str]) -> Dict[str, Type[BaseModel]]:

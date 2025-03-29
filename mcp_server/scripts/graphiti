@@ -1,33 +1,45 @@
 #!/bin/bash
 set -e # Exit immediately if a command exits with a non-zero status.
 
+# Define color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
 # Function to display usage information
 usage() {
-  echo "Usage: graphiti [-h|--help] [COMMAND] [ARGS...]"
+  echo -e "${BOLD}Usage:${NC} graphiti [-h|--help] [COMMAND] [ARGS...]"
   echo
-  echo "Commands:"
-  echo "  init PROJECT_NAME [DIR]        Initialize a project: run link-dev-files and setup-rules."
-  echo "  add-entities SET_NAME          Create a new entity type set with an example entity in the mcp-graphiti repo."
-  echo "  setup-rules PROJECT_NAME [DIR] Setup Cursor rules (.mdc files) for Graphiti in a target project directory."
-  echo "  link-dev-files [DIR]           (Default if no command) Create dev symlinks (entity_types, docker-compose.yml)."
-  echo "  up [-d]                        Start all containers using docker compose. Use -d for detached mode."
-  echo "  down                           Stop and remove all containers using docker compose."
+  echo -e "${BOLD}Commands:${NC}"
+  echo -e "  ${CYAN}init${NC} PROJECT_NAME [DIR]        Initialize a project: run link and rules."
+  echo -e "  ${CYAN}entity${NC} SET_NAME                Create a new entity type set with an example entity in the mcp-graphiti repo."
+  echo -e "  ${CYAN}rules${NC} PROJECT_NAME [DIR]       Setup Cursor rules (.mdc files) for Graphiti in a target project directory."
+  echo -e "  ${CYAN}link${NC} [DIR]                     (Default if no command) Create dev symlinks (entity_types, docker-compose.yml)."
+  echo -e "  ${CYAN}up${NC} [-d] [--log-level LEVEL]    Start all containers using docker compose. Use -d for detached mode."
+  echo -e "  ${CYAN}down${NC} [--log-level LEVEL]       Stop and remove all containers using docker compose."
+  echo -e "  ${CYAN}restart${NC} [--log-level LEVEL]    Restart all containers: runs 'down' followed by 'up'."
   echo
-  echo "Arguments for init & setup-rules:"
-  echo "  PROJECT_NAME  Name of the target project (used for schema filename)."
-  echo "  DIR           Optional. Target project root directory. Defaults to current directory (.)."
+  echo -e "${BOLD}Arguments for init & rules:${NC}"
+  echo -e "  ${BOLD}PROJECT_NAME${NC}  Name of the target project (used for schema filename)."
+  echo -e "  ${BOLD}DIR${NC}           Optional. Target project root directory. Defaults to current directory (.)."
   echo
-  echo "Arguments for link-dev-files:"
-  echo "  DIR           Optional. Target directory for dev links. Defaults to current directory (.)."
+  echo -e "${BOLD}Arguments for link:${NC}"
+  echo -e "  ${BOLD}DIR${NC}           Optional. Target directory for dev links. Defaults to current directory (.)."
   echo
-  echo "Options:"
-  echo "  -h, --help        Show this help message and exit."
-  echo "  -d                Run containers in detached mode (background) with 'up' command."
+  echo -e "${BOLD}Options:${NC}"
+  echo -e "  ${BOLD}-h, --help${NC}                Show this help message and exit."
+  echo -e "  ${BOLD}-d${NC}                        Run containers in detached mode (background) with 'up' command."
+  echo -e "  ${BOLD}--log-level LEVEL${NC}         Set logging level (with up/down/restart). Valid values: debug, info, warn, error, fatal."
+  echo -e "                                  Default: info"
   echo
-  echo "Prerequisites:"
-  echo "  The MCP_GRAPHITI_REPO_PATH environment variable must be set to the"
-  echo "  absolute path of your local mcp-graphiti repository."
-  echo "  Example: export MCP_GRAPHITI_REPO_PATH=/path/to/mcp-graphiti"
+  echo -e "${BOLD}Prerequisites:${NC}"
+  echo -e "  The ${CYAN}MCP_GRAPHITI_REPO_PATH${NC} environment variable must be set to the"
+  echo -e "  absolute path of your local mcp-graphiti repository."
+  echo -e "  Example: ${YELLOW}export MCP_GRAPHITI_REPO_PATH=/path/to/mcp-graphiti${NC}"
   exit 0
 }
 
@@ -59,13 +71,13 @@ _link_dev_files() {
   local TARGET_DOCKER_COMPOSE="$TARGET_DIR/docker-compose.yml"
 
   # Create/Update Symlinks for dev files
-  echo "Linking entity types to $TARGET_ENTITY_TYPES"
+  echo -e "Linking entity types to ${CYAN}$TARGET_ENTITY_TYPES${NC}"
   ln -sf "$SOURCE_ENTITY_TYPES" "$TARGET_ENTITY_TYPES"
 
-  echo "Linking docker-compose.yml to $TARGET_DOCKER_COMPOSE"
+  echo -e "Linking docker-compose.yml to ${CYAN}$TARGET_DOCKER_COMPOSE${NC}"
   ln -sf "$SOURCE_DOCKER_COMPOSE" "$TARGET_DOCKER_COMPOSE"
 
-  echo "Graphiti dev links created successfully in $TARGET_DIR."
+  echo -e "${GREEN}Graphiti dev links created successfully in $TARGET_DIR.${NC}"
 }
 
 # --- Helper Function for Setting Up Rules ---
@@ -75,7 +87,7 @@ _setup_rules() {
 
   # Validate PROJECT_NAME format (optional, but good practice)
   if ! [[ "$PROJECT_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    echo "Error: Invalid PROJECT_NAME. Use only letters, numbers, underscores, and hyphens."
+    echo -e "${RED}Error: Invalid PROJECT_NAME. Use only letters, numbers, underscores, and hyphens.${NC}"
     exit 1
   fi
 
@@ -88,42 +100,42 @@ _setup_rules() {
   local TARGET_SCHEMA_FILE="$CURSOR_RULES_DIR/graphiti-$PROJECT_NAME-schema.mdc"
   local SCHEMA_TEMPLATE_FILE="$SOURCE_SERVER_DIR/rules/templates/project_schema_template.md"
 
-  echo "Setting up Graphiti Cursor rules for project '$PROJECT_NAME' in $TARGET_DIR"
+  echo -e "Setting up Graphiti Cursor rules for project '${CYAN}$PROJECT_NAME${NC}' in ${CYAN}$TARGET_DIR${NC}"
 
   # Create target directory
   mkdir -p "$CURSOR_RULES_DIR"
-  echo "Created rules directory: $CURSOR_RULES_DIR"
+  echo -e "Created rules directory: ${CYAN}$CURSOR_RULES_DIR${NC}"
 
   # Check source files exist before linking/generating
   if [ ! -f "$SOURCE_CORE_RULE" ]; then
-    echo "Error: Source rule file not found: $SOURCE_CORE_RULE"
+    echo -e "${RED}Error: Source rule file not found: $SOURCE_CORE_RULE${NC}"
     exit 1
   fi
   if [ ! -f "$SOURCE_MAINT_RULE" ]; then
-    echo "Error: Source rule file not found: $SOURCE_MAINT_RULE"
+    echo -e "${RED}Error: Source rule file not found: $SOURCE_MAINT_RULE${NC}"
     exit 1
   fi
   if [ ! -f "$SCHEMA_TEMPLATE_FILE" ]; then
-    echo "Error: Schema template file not found: $SCHEMA_TEMPLATE_FILE"
+    echo -e "${RED}Error: Schema template file not found: $SCHEMA_TEMPLATE_FILE${NC}"
     exit 1
   fi
 
   # Create symlinks
-  echo "Linking core rule: $TARGET_CORE_RULE_LINK -> $SOURCE_CORE_RULE"
+  echo -e "Linking core rule: ${CYAN}$TARGET_CORE_RULE_LINK${NC} -> ${CYAN}$SOURCE_CORE_RULE${NC}"
   ln -sf "$SOURCE_CORE_RULE" "$TARGET_CORE_RULE_LINK"
 
-  echo "Linking maintenance rule: $TARGET_MAINT_RULE_LINK -> $SOURCE_MAINT_RULE"
+  echo -e "Linking maintenance rule: ${CYAN}$TARGET_MAINT_RULE_LINK${NC} -> ${CYAN}$SOURCE_MAINT_RULE${NC}"
   ln -sf "$SOURCE_MAINT_RULE" "$TARGET_MAINT_RULE_LINK"
 
   # Generate template project schema file from template (.md -> .mdc)
   if [ -e "$TARGET_SCHEMA_FILE" ]; then
-    echo "Warning: Project schema file already exists, skipping template generation: $TARGET_SCHEMA_FILE"
+    echo -e "${YELLOW}Warning: Project schema file already exists, skipping template generation: $TARGET_SCHEMA_FILE${NC}"
   else
-    echo "Generating template project schema file: $TARGET_SCHEMA_FILE"
+    echo -e "Generating template project schema file: ${CYAN}$TARGET_SCHEMA_FILE${NC}"
     sed "s/__PROJECT_NAME__/$PROJECT_NAME/g" "$SCHEMA_TEMPLATE_FILE" > "$TARGET_SCHEMA_FILE"
   fi
 
-  echo "Graphiti Cursor rules setup complete for project '$PROJECT_NAME'."
+  echo -e "${GREEN}Graphiti Cursor rules setup complete for project '$PROJECT_NAME'.${NC}"
 }
 
 # Function to find the repository path based on script location
@@ -235,6 +247,28 @@ save_path_to_shell_config() {
   fi
 }
 
+# Function to validate and set the log level
+validate_log_level() {
+  local log_level=$1
+  
+  # Convert to lowercase for case-insensitive comparison
+  log_level=$(echo "$log_level" | tr '[:upper:]' '[:lower:]')
+  
+  # Validate against allowed values
+  case "$log_level" in
+    debug|info|warn|error|fatal)
+      echo "$log_level"
+      return 0
+      ;;
+    *)
+      echo -e "${RED}Error: Invalid log level '$log_level'. Valid values are: debug, info, warn, error, fatal.${NC}" >&2
+      echo -e "Using default log level: info" >&2
+      echo "info"
+      return 1
+      ;;
+  esac
+}
+
 # Check for help flag
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
   usage
@@ -242,34 +276,34 @@ fi
 
 # 1. Check and Determine Source Path
 if [ -z "$MCP_GRAPHITI_REPO_PATH" ]; then
-  echo "MCP_GRAPHITI_REPO_PATH is not set. Attempting to auto-detect..."
+  echo -e "${YELLOW}MCP_GRAPHITI_REPO_PATH is not set. Attempting to auto-detect...${NC}"
   
   # Try to auto-detect the repository path based on script location
   AUTO_DETECTED_PATH=$(detect_repo_path)
   
   if [ -n "$AUTO_DETECTED_PATH" ]; then
-    echo "Detected repository path: $AUTO_DETECTED_PATH"
+    echo -e "Detected repository path: ${CYAN}$AUTO_DETECTED_PATH${NC}"
     export MCP_GRAPHITI_REPO_PATH="$AUTO_DETECTED_PATH"
     
     # Offer to save it permanently
     save_path_to_shell_config "$AUTO_DETECTED_PATH"
   else
-    echo "Error: Could not auto-detect the repository path."
-    echo "Please set the MCP_GRAPHITI_REPO_PATH environment variable manually."
-    echo "Example: export MCP_GRAPHITI_REPO_PATH=/path/to/mcp-graphiti"
+    echo -e "${RED}Error: Could not auto-detect the repository path.${NC}"
+    echo -e "Please set the ${CYAN}MCP_GRAPHITI_REPO_PATH${NC} environment variable manually."
+    echo -e "Example: ${YELLOW}export MCP_GRAPHITI_REPO_PATH=/path/to/mcp-graphiti${NC}"
     exit 1
   fi
 fi
 
 SOURCE_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
 if [ ! -d "$SOURCE_SERVER_DIR" ]; then
-  echo "Error: Source directory not found: $SOURCE_SERVER_DIR"
-  echo "Please ensure MCP_GRAPHITI_REPO_PATH is set correctly."
+  echo -e "${RED}Error: Source directory not found: $SOURCE_SERVER_DIR${NC}"
+  echo -e "Please ensure ${CYAN}MCP_GRAPHITI_REPO_PATH${NC} is set correctly."
   exit 1
 fi
 
 # 2. Parse command and arguments
-COMMAND="${1:-link-dev-files}" # Default to link-dev-files if no command provided
+COMMAND="${1:-link}" # Default to link if no command provided
 shift || true # Shift arguments even if $1 was empty (no command given). Use || true to prevent exit on error if no args.
 
 # Handle commands using if/elif/else structure
@@ -278,49 +312,73 @@ if [[ "$COMMAND" == "init" ]]; then
   TARGET_DIR="${2:-.}" # Default target directory to current if not provided
 
   if [ -z "$PROJECT_NAME" ]; then
-    echo "Error: Missing PROJECT_NAME argument for init command."
-    echo "Usage: graphiti init PROJECT_NAME [TARGET_DIRECTORY]"
+    echo -e "${RED}Error: Missing PROJECT_NAME argument for init command.${NC}"
+    echo -e "Usage: ${CYAN}graphiti init PROJECT_NAME [TARGET_DIRECTORY]${NC}"
     exit 1
   fi
 
-  echo "Initializing Graphiti project '$PROJECT_NAME' in '$TARGET_DIR'..."
+  echo -e "Initializing Graphiti project '${CYAN}$PROJECT_NAME${NC}' in '${CYAN}$TARGET_DIR${NC}'..."
 
   # Call the helper functions
   _link_dev_files "$TARGET_DIR"
   _setup_rules "$PROJECT_NAME" "$TARGET_DIR"
 
-  echo "Graphiti project '$PROJECT_NAME' initialization complete."
+  echo -e "${GREEN}Graphiti project '$PROJECT_NAME' initialization complete.${NC}"
   exit 0
 
 elif [[ "$COMMAND" == "up" ]]; then
-  # Check for detached mode flag
+  # Parse flags
   DETACHED=""
-  if [[ "$1" == "-d" ]]; then
-    DETACHED="-d"
-    shift
-  fi
+  LOG_LEVEL_OVERRIDE=""
+  
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -d)
+        DETACHED="-d"
+        shift
+        ;;
+      --log-level)
+        if [[ -z "$2" || "$2" == -* ]]; then
+          echo -e "${RED}Error: --log-level requires a value${NC}"
+          exit 1
+        fi
+        LOG_LEVEL_OVERRIDE=$(validate_log_level "$2")
+        shift 2
+        ;;
+      *)
+        echo -e "${RED}Error: Unknown option: $1${NC}"
+        usage
+        ;;
+    esac
+  done
 
   # We need to run docker-compose from the mcp_server directory
   MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
   
   if [ ! -d "$MCP_SERVER_DIR" ]; then
-    echo "Error: mcp_server directory not found at $MCP_SERVER_DIR"
+    echo -e "${RED}Error: mcp_server directory not found at $MCP_SERVER_DIR${NC}"
     exit 1
   fi
 
   # Save current directory to return to it afterwards
   CURRENT_DIR=$(pwd)
   
-  echo "Starting Graphiti containers with docker compose..."
-  echo "This will rebuild containers to incorporate any changes."
-  echo "Running Docker Compose from: $MCP_SERVER_DIR"
+  echo -e "${BOLD}Starting Graphiti containers with docker compose...${NC}"
+  echo -e "This will rebuild containers to incorporate any changes."
+  echo -e "Running Docker Compose from: ${CYAN}$MCP_SERVER_DIR${NC}"
   
   # Change to mcp_server directory where docker-compose.yml is located
   cd "$MCP_SERVER_DIR"
   
+  # Create environment variable exports for Docker Compose
+  if [ -n "$LOG_LEVEL_OVERRIDE" ]; then
+    echo -e "Setting log level to: ${CYAN}$LOG_LEVEL_OVERRIDE${NC}"
+    export GRAPHITI_LOG_LEVEL="$LOG_LEVEL_OVERRIDE"
+  fi
+  
   # Run docker compose up with build and force-recreate flags
   if [ -n "$DETACHED" ]; then
-    echo "Running in detached mode."
+    echo -e "${YELLOW}Running in detached mode.${NC}"
     docker compose up --build --force-recreate -d
   else
     docker compose up --build --force-recreate
@@ -329,26 +387,52 @@ elif [[ "$COMMAND" == "up" ]]; then
   # Return to original directory
   cd "$CURRENT_DIR"
   
-  echo "Docker compose up completed."
+  echo -e "${GREEN}Docker compose up completed.${NC}"
   exit 0
 
 elif [[ "$COMMAND" == "down" ]]; then
+  # Parse flags
+  LOG_LEVEL_OVERRIDE=""
+  
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --log-level)
+        if [[ -z "$2" || "$2" == -* ]]; then
+          echo -e "${RED}Error: --log-level requires a value${NC}"
+          exit 1
+        fi
+        LOG_LEVEL_OVERRIDE=$(validate_log_level "$2")
+        shift 2
+        ;;
+      *)
+        echo -e "${RED}Error: Unknown option: $1${NC}"
+        usage
+        ;;
+    esac
+  done
+  
   # We need to run docker-compose from the mcp_server directory
   MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
   
   if [ ! -d "$MCP_SERVER_DIR" ]; then
-    echo "Error: mcp_server directory not found at $MCP_SERVER_DIR"
+    echo -e "${RED}Error: mcp_server directory not found at $MCP_SERVER_DIR${NC}"
     exit 1
   fi
 
   # Save current directory to return to it afterwards
   CURRENT_DIR=$(pwd)
   
-  echo "Stopping and removing Graphiti containers..."
-  echo "Running Docker Compose from: $MCP_SERVER_DIR"
+  echo -e "${BOLD}Stopping and removing Graphiti containers...${NC}"
+  echo -e "Running Docker Compose from: ${CYAN}$MCP_SERVER_DIR${NC}"
   
   # Change to mcp_server directory where docker-compose.yml is located
   cd "$MCP_SERVER_DIR"
+  
+  # Set environment variables for Docker Compose
+  if [ -n "$LOG_LEVEL_OVERRIDE" ]; then
+    echo -e "Setting log level to: ${CYAN}$LOG_LEVEL_OVERRIDE${NC}"
+    export GRAPHITI_LOG_LEVEL="$LOG_LEVEL_OVERRIDE"
+  fi
   
   # Run docker compose down to stop and remove containers
   docker compose down
@@ -356,23 +440,91 @@ elif [[ "$COMMAND" == "down" ]]; then
   # Return to original directory
   cd "$CURRENT_DIR"
   
-  echo "Docker compose down completed."
+  echo -e "${GREEN}Docker compose down completed.${NC}"
   exit 0
 
-elif [[ "$COMMAND" == "add-entities" ]]; then
+elif [[ "$COMMAND" == "restart" ]]; then
+  # Parse flags
+  DETACHED=""
+  LOG_LEVEL_OVERRIDE=""
+  
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -d)
+        DETACHED="-d"
+        shift
+        ;;
+      --log-level)
+        if [[ -z "$2" || "$2" == -* ]]; then
+          echo -e "${RED}Error: --log-level requires a value${NC}"
+          exit 1
+        fi
+        LOG_LEVEL_OVERRIDE=$(validate_log_level "$2")
+        shift 2
+        ;;
+      *)
+        echo -e "${RED}Error: Unknown option: $1${NC}"
+        usage
+        ;;
+    esac
+  done
+  
+  # We need to run docker-compose from the mcp_server directory
+  MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
+  
+  if [ ! -d "$MCP_SERVER_DIR" ]; then
+    echo -e "${RED}Error: mcp_server directory not found at $MCP_SERVER_DIR${NC}"
+    exit 1
+  fi
+
+  # Save current directory to return to it afterwards
+  CURRENT_DIR=$(pwd)
+  
+  echo -e "${BOLD}Restarting Graphiti containers: first down, then up...${NC}"
+  echo -e "Running Docker Compose from: ${CYAN}$MCP_SERVER_DIR${NC}"
+  
+  # Set environment variables for Docker Compose
+  if [ -n "$LOG_LEVEL_OVERRIDE" ]; then
+    echo -e "Setting log level to: ${CYAN}$LOG_LEVEL_OVERRIDE${NC}"
+    export GRAPHITI_LOG_LEVEL="$LOG_LEVEL_OVERRIDE"
+  fi
+  
+  # Change to mcp_server directory where docker-compose.yml is located
+  cd "$MCP_SERVER_DIR"
+  
+  # First run docker compose down
+  echo -e "${CYAN}Stopping containers...${NC}"
+  docker compose down
+  
+  # Then run docker compose up
+  echo -e "${CYAN}Starting containers...${NC}"
+  if [ -n "$DETACHED" ]; then
+    echo -e "${YELLOW}Running in detached mode.${NC}"
+    docker compose up --build --force-recreate -d
+  else
+    docker compose up --build --force-recreate
+  fi
+  
+  # Return to original directory
+  cd "$CURRENT_DIR"
+  
+  echo -e "${GREEN}Restart sequence completed.${NC}"
+  exit 0
+
+elif [[ "$COMMAND" == "entity" ]]; then
   # Get SET_NAME from first remaining argument
   SET_NAME="$1"
   
   # Input validation
   if [ -z "$SET_NAME" ]; then
-    echo "Error: Missing SET_NAME argument."
-    echo "Usage: graphiti add-entities SET_NAME"
+    echo -e "${RED}Error: Missing SET_NAME argument.${NC}"
+    echo -e "Usage: ${CYAN}graphiti entity SET_NAME${NC}"
     exit 1
   fi
   
   # Validate SET_NAME format (only allow letters, numbers, underscores, hyphens)
   if ! [[ "$SET_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    echo "Error: Invalid SET_NAME. Use only letters, numbers, underscores, and hyphens."
+    echo -e "${RED}Error: Invalid SET_NAME. Use only letters, numbers, underscores, and hyphens.${NC}"
     exit 1
   fi
   
@@ -429,13 +581,13 @@ EOF
   echo "Entity set '$SET_NAME' successfully created."
   exit 0
 
-elif [[ "$COMMAND" == "setup-rules" ]]; then
+elif [[ "$COMMAND" == "rules" ]]; then
   PROJECT_NAME="$1"
   TARGET_DIR="${2:-.}" # Default target directory to current if not provided
 
   if [ -z "$PROJECT_NAME" ]; then
-    echo "Error: Missing PROJECT_NAME argument for setup-rules command."
-    echo "Usage: graphiti setup-rules PROJECT_NAME [TARGET_DIRECTORY]"
+    echo "Error: Missing PROJECT_NAME argument for rules command."
+    echo "Usage: graphiti rules PROJECT_NAME [TARGET_DIRECTORY]"
     exit 1
   fi
 
@@ -443,9 +595,9 @@ elif [[ "$COMMAND" == "setup-rules" ]]; then
   _setup_rules "$PROJECT_NAME" "$TARGET_DIR"
   exit 0
 
-elif [[ "$COMMAND" == "link-dev-files" ]]; then
+elif [[ "$COMMAND" == "link" ]]; then
   # Determine Target Directory for dev links
-  TARGET_DIR="${1:-.}" # Use first arg after 'link-dev-files' or default to '.' if no command/args
+  TARGET_DIR="${1:-.}" # Use first arg after 'link' or default to '.' if no command/args
 
   # Call the helper function
   _link_dev_files "$TARGET_DIR"

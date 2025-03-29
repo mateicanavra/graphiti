@@ -12,6 +12,7 @@ x-common-env: &common-env
   NEO4J_USER: "neo4j"
   NEO4J_PASSWORD: "demodemo"
   OPENAI_API_KEY: ${OPENAI_API_KEY}
+  GRAPHITI_LOG_LEVEL: ${GRAPHITI_LOG_LEVEL:-info}
   PATH: "/root/.local/bin:${PATH}"
 
 services:
@@ -57,7 +58,7 @@ services:
       "--transport", "sse",
       "--group-id", "magic-api",
       "--use-custom-entities",
-      "--entity-type-dir", "mcp_server/entity_types/base"
+      "--entity-type-dir", "entity_types/base"
     ]
   graphiti-civ7:
     build:
@@ -83,7 +84,7 @@ services:
       "--transport", "sse",
       "--group-id", "civ7",
       "--use-custom-entities",
-      "--entity-type-dir", "mcp_server/entity_types/example"
+      "--entity-type-dir", "entity_types/example"
     ]
   graphiti-mcp-filesystem:
     build:
@@ -135,8 +136,36 @@ services:
       "--transport", "sse",
       "--group-id", "graphiti-source",
       "--use-custom-entities",
-      "--entity-type-dir", "mcp_server/entity_types/graphiti"
+      "--entity-type-dir", "entity_types/graphiti"
     ]
+  graphiti-magic-candidates:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - path: .env
+        required: false # Makes the file optional. Default value is 'true'
+    depends_on:
+      graphiti-magic-api:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    environment:
+      <<: [*model-version, *common-env]
+    healthcheck:
+      <<: *healthcheck
+    ports:
+      - "8004:8000" # Expose the MCP server via HTTP for SSE transport
+    command: [
+      "uv", "run",
+      "graphiti_mcp_server.py",
+      "--transport", "sse",
+      "--group-id", "graphiti-candidates",
+      "--use-custom-entities",
+      "--entity-type-dir", "entity_types/candidates"
+    ]
+
+    
 
 volumes:
   neo4j_data:

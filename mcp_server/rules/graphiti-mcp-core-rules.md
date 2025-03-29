@@ -69,6 +69,23 @@ For effective project work, be aware of the three key types of Graphiti rules:
 - **Document your reasoning:** When making extraction or classification decisions, briefly note your reasoning.
 - **Handle edge cases gracefully:** Plan for anomalies and develop consistent strategies for handling them.
 - **Validate entity coherence:** Ensure extracted entities form a coherent, logically consistent set.
+- **Understand parameter behavior:** Be aware of specific tool parameter nuances:
+  - For `mcp_graphiti_core_add_episode`, avoid explicitly providing `group_id` as a string—let the system use defaults from command line configuration or generate one automatically.
+  - Use episode source types appropriately: 'text' for plain content, 'json' for structured data that should automatically extract entities and relationships, and 'message' for conversation-style content.
+- **Leverage advanced search capabilities:** When using search tools:
+  - Use hybrid search combining vector similarity, full-text search, and graph traversal.
+  - Set appropriate `max_nodes` and `max_facts` to control result volume.
+  - Apply `entity` parameter when filtering for specific entity types (e.g., "Preference", "Procedure").
+  - Use advanced re-ranking strategies for more contextually relevant results.
+
+## MCP Server Codebase Organization
+
+- **Prefer flat directory structures:** Use consolidated, shallow directory hierarchies over deeply nested ones.
+- **Group similar entity types:** Place related entity types within a single directory (e.g., `entity_types/graphiti/`).
+- **Follow semantic naming:** Name entity type files according to their semantic type (e.g., `ArchitecturalPattern.py`) rather than using generic names.
+- **Remove redundant files:** Keep the codebase clean by removing unnecessary `__init__.py` files in auto-loaded directories.
+- **Clean up after reorganization:** Systematically remove empty directories after file restructuring.
+- **Maintain proper entity structure:** Ensure all entity types follow the Pydantic model pattern with well-defined fields, descriptions, and extraction instructions.
 
 ## Maintaining Context and Continuity
 
