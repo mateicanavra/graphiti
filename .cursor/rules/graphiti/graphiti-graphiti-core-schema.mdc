@@ -16,41 +16,89 @@ This document outlines the specific knowledge graph schema for the 'graphiti-cor
 
 ## 1. Defined Entity Types
 
-*Add definitions for entities specific to the 'graphiti-core' project here.*
-*Reference the entity definition files (e.g., Python classes) if applicable.*
+### High-Level Architectural Entities
 
-Example:
-*   **`MyEntity`**: Description of what this entity represents.
-    *   Reference: `@path/to/your/entity/definition.py` (if applicable)
-    *   Fields: `field1` (type), `field2` (type)
+*   **`ArchitecturalPatternEntity`**: Represents a high-level design pattern, principle, or architectural approach used in the system.
+    *   Reference: `@mcp_server/entity_types/ArchitecturalPattern/entity.py`
+    *   Fields: `name` (str), `description` (str), `benefits` (List[str]), `implementation_details` (str), `related_components` (List[str])
+
+*   **`DataPipelineEntity`**: Represents a workflow or sequence of operations that transform, process, or move data within the system.
+    *   Reference: `@mcp_server/entity_types/DataPipeline/entity.py`
+    *   Fields: `name` (str), `description` (str), `stages` (List[str]), `input_data` (str), `output_data` (str), `components` (List[str])
+
+*   **`TemporalModelEntity`**: Represents an approach to modeling data that incorporates time dimensions.
+    *   Reference: `@mcp_server/entity_types/TemporalModel/entity.py`
+    *   Fields: `name` (str), `description` (str), `time_dimensions` (List[str]), `query_capabilities` (str), `implementation` (str), `use_cases` (List[str])
+
+*   **`RetrievalMethodEntity`**: Represents an approach or technique for finding and retrieving information from the knowledge graph.
+    *   Reference: `@mcp_server/entity_types/RetrievalMethod/entity.py`
+    *   Fields: `name` (str), `description` (str), `algorithms` (List[str]), `strengths` (List[str]), `limitations` (List[str]), `use_cases` (List[str])
+
+*   **`IntegrationPatternEntity`**: Represents an approach or technique for connecting Graphiti with external systems, databases, or services.
+    *   Reference: `@mcp_server/entity_types/IntegrationPattern/entity.py`
+    *   Fields: `name` (str), `description` (str), `interfaces` (List[str]), `external_systems` (List[str]), `implementation_details` (str), `benefits` (List[str])
 
 ---
 
 ## 2. Defined Relationships (Facts)
 
-*Define the key relationships (subject-predicate-object triples) specific to 'graphiti-core'.*
+*   **Subject:** `ArchitecturalPatternEntity`
+*   **Predicate:** `IMPLEMENTED_BY`
+*   **Object:** `Component` (generic entity representing a system component)
 
-Example:
-*   **Subject:** `MyEntity`
-*   **Predicate:** `RELATED_TO`
-*   **Object:** `AnotherEntity`
+    *Example Fact:* `(ArchitecturalPatternEntity: 'Dependency Inversion') --[IMPLEMENTED_BY]-> (Component: 'LLMClient')`
+    *Extraction Rule:* Identify when an architectural pattern is implemented by a specific component or module in the system.
 
-    *Example Fact:* `(MyEntity: 'Instance A') --[RELATED_TO]-> (AnotherEntity: 'Instance B')`
-    *Extraction Rule:* Briefly describe how to identify this relationship.
+*   **Subject:** `DataPipelineEntity`
+*   **Predicate:** `PROCESSES`
+*   **Object:** `DataType` (generic entity representing a type of data)
+
+    *Example Fact:* `(DataPipelineEntity: 'Entity Extraction Pipeline') --[PROCESSES]-> (DataType: 'Unstructured Text')`
+    *Extraction Rule:* Identify what kind of data a pipeline processes as input.
+
+*   **Subject:** `TemporalModelEntity`
+*   **Predicate:** `ENABLES`
+*   **Object:** `Capability` (generic entity representing a system capability)
+
+    *Example Fact:* `(TemporalModelEntity: 'Bi-temporal Model') --[ENABLES]-> (Capability: 'Historical Knowledge State Queries')`
+    *Extraction Rule:* Identify capabilities or features that are made possible by a temporal model.
+
+*   **Subject:** `RetrievalMethodEntity`
+*   **Predicate:** `COMPLEMENTS`
+*   **Object:** `RetrievalMethodEntity`
+
+    *Example Fact:* `(RetrievalMethodEntity: 'Semantic Search') --[COMPLEMENTS]-> (RetrievalMethodEntity: 'Graph Traversal')`
+    *Extraction Rule:* Identify when retrieval methods are used together or complement each other.
+
+*   **Subject:** `IntegrationPatternEntity`
+*   **Predicate:** `CONNECTS_TO`
+*   **Object:** `ExternalSystem` (generic entity representing an external system or service)
+
+    *Example Fact:* `(IntegrationPatternEntity: 'LLM Provider Abstraction') --[CONNECTS_TO]-> (ExternalSystem: 'OpenAI API')`
+    *Extraction Rule:* Identify which external systems or services are connected via an integration pattern.
 
 ---
 
 ## 3. Project-Specific Extraction Guidelines
 
-*Add any extraction rules or nuances unique to the 'graphiti-core' project.*
-*These guidelines supplement or specialize instructions in entity definitions and core rules.*
+*   **Architectural Pattern Identification:** When analyzing code or documentation, prioritize identifying high-level patterns over specific implementation details. Look for class hierarchies, interface definitions, and dependency injection.
 
-Example:
-*   **Handling Ambiguity:** How to resolve conflicts when multiple potential entities match.
-*   **Inference Rules:** Conditions under which properties can be inferred.
+*   **Handling Technological Overlap:** Many components in Graphiti may exhibit multiple patterns or be part of multiple pipelines. When extracting entities, focus on the primary purpose or pattern, but note secondary ones in the description.
+
+*   **Component Relationship Inference:** When a component is mentioned in the context of multiple high-level entities, infer relationships between those entities even if not explicitly stated.
+
+*   **LLM Provider Integration:** Pay special attention to how different LLM providers are integrated. This is a key integration pattern in the system that deserves thorough documentation.
+
+*   **Temporal Model Documentation:** Ensure any references to time dimensions or temporal aspects of the system are captured in the appropriate TemporalModel entities.
 
 ---
 
 ## 4. Future Evolution
 
-*Briefly mention potential future directions or areas for schema expansion.* 
+Future schema enhancements may include:
+
+*   More detailed modeling of LLM provider interfaces and capabilities
+*   Expanded entity types for database models and schema elements
+*   Performance characteristics and metrics for retrieval methods
+*   Security and access control patterns
+*   Deployment and operational patterns 

@@ -1,9 +1,18 @@
+version: "3.8"
 x-healthcheck: &healthcheck
   test: ["CMD-SHELL", "curl -s -I --max-time 1 http://localhost:8000/sse | grep -q 'text/event-stream' || exit 1"]
   interval: 30s
   timeout: 10s
   retries: 5
   start_period: 5s
+x-model-version: &model-version
+  MODEL_NAME: "o3-mini"
+x-common-env: &common-env
+  NEO4J_URI: "bolt://neo4j:7687"
+  NEO4J_USER: "neo4j"
+  NEO4J_PASSWORD: "demodemo"
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
+  PATH: "/root/.local/bin:${PATH}"
 
 services:
   neo4j:
@@ -37,12 +46,7 @@ services:
       neo4j:
         condition: service_healthy
     environment:
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=demodemo
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - MODEL_NAME=${MODEL_NAME}
-      - PATH=/root/.local/bin:${PATH}
+      <<: [*model-version, *common-env]
     healthcheck:
       <<: *healthcheck
     ports:
@@ -68,12 +72,7 @@ services:
       neo4j:
         condition: service_healthy
     environment:
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=demodemo
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - MODEL_NAME=${MODEL_NAME}
-      - PATH=/root/.local/bin:${PATH}
+      <<: [*model-version, *common-env]
     healthcheck:
       <<: *healthcheck
     ports:
@@ -99,12 +98,7 @@ services:
       neo4j:
         condition: service_healthy
     environment:
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=demodemo
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - MODEL_NAME=${MODEL_NAME}
-      - PATH=/root/.local/bin:${PATH}
+      <<: [*model-version, *common-env]
     healthcheck:
       <<: *healthcheck
     ports:
@@ -130,12 +124,7 @@ services:
       neo4j:
         condition: service_healthy
     environment:
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=demodemo
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - MODEL_NAME=${MODEL_NAME}
-      - PATH=/root/.local/bin:${PATH}
+      <<: [*model-version, *common-env]
     healthcheck:
       <<: *healthcheck
     ports:
@@ -146,7 +135,7 @@ services:
       "--transport", "sse",
       "--group-id", "graphiti-source",
       "--use-custom-entities",
-      "--entity-type-dir", "mcp_server/entity_types/base"
+      "--entity-type-dir", "mcp_server/entity_types/graphiti"
     ]
 
 volumes:
