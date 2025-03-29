@@ -1,0 +1,228 @@
+#!/bin/bash
+set -e # Exit immediately if a command exits with a non-zero status.
+
+# Function to display usage information
+usage() {
+  echo "Usage: graphiti [-h|--help] [COMMAND] [ARGS...]"
+  echo
+  echo "Commands:"
+  echo "  add-entities SET_NAME          Create a new entity type set with an example entity in the mcp-graphiti repo."
+  echo "  setup-rules PROJECT_NAME [DIR] Setup Cursor rules (.mdc files) for Graphiti in a target project directory."
+  echo "  link-dev-files [DIR]           (Default if no command) Create dev symlinks (entity_types, docker-compose.yml)."
+  echo
+  echo "Arguments for setup-rules:"
+  echo "  PROJECT_NAME  Name of the target project (used for schema filename)."
+  echo "  DIR           Optional. Target project root directory. Defaults to current directory (.)."
+  echo
+  echo "Arguments for link-dev-files:"
+  echo "  DIR           Optional. Target directory for dev links. Defaults to current directory (.)."
+  echo
+  echo "Options:"
+  echo "  -h, --help        Show this help message and exit."
+  echo
+  echo "Prerequisites:"
+  echo "  The MCP_GRAPHITI_REPO_PATH environment variable must be set to the"
+  echo "  absolute path of your local mcp-graphiti repository."
+  echo "  Example: export MCP_GRAPHITI_REPO_PATH=/path/to/mcp-graphiti"
+  exit 0
+}
+
+# Function to convert set name to a class name (e.g., my-cool-set to MyCoolSetEntity)
+set_name_to_class_name() {
+  local set_name="$1"
+  local class_name=""
+  
+  # Split by hyphens and underscores, capitalize each part, and join
+  IFS='-_' read -ra PARTS <<< "$set_name"
+  for part in "${PARTS[@]}"; do
+    # Capitalize first letter of each part
+    class_name+="$(tr '[:lower:]' '[:upper:]' <<< "${part:0:1}")${part:1}"
+  done
+  
+  # Add "Entity" suffix
+  echo "${class_name}Entity"
+}
+
+# Check for help flag
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
+fi
+
+# 1. Check and Determine Source Path
+if [ -z "$MCP_GRAPHITI_REPO_PATH" ]; then
+  echo "Error: MCP_GRAPHITI_REPO_PATH environment variable is not set."
+  echo
+  usage # Show usage instructions if variable is missing
+fi
+
+SOURCE_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
+if [ ! -d "$SOURCE_SERVER_DIR" ]; then
+  echo "Error: Source directory not found: $SOURCE_SERVER_DIR"
+  echo "Please ensure MCP_GRAPHITI_REPO_PATH is set correctly."
+  exit 1
+fi
+
+# 2. Check for commands
+COMMAND="$1"
+shift # Remove command from arguments list
+
+# Handle add-entities command
+if [[ "$COMMAND" == "add-entities" ]]; then
+  # Get SET_NAME from first remaining argument
+  SET_NAME="$1"
+  
+  # Input validation
+  if [ -z "$SET_NAME" ]; then
+    echo "Error: Missing SET_NAME argument."
+    echo "Usage: graphiti add-entities SET_NAME"
+    exit 1
+  fi
+  
+  # Validate SET_NAME format (only allow letters, numbers, underscores, hyphens)
+  if ! [[ "$SET_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "Error: Invalid SET_NAME. Use only letters, numbers, underscores, and hyphens."
+    exit 1
+  fi
+  
+  # Path construction
+  ENTITY_TYPES_DIR="$SOURCE_SERVER_DIR/entity_types"
+  NEW_SET_DIR="$ENTITY_TYPES_DIR/$SET_NAME"
+  
+  # Check if directory already exists
+  if [ -d "$NEW_SET_DIR" ]; then
+    echo "Error: Entity type set '$SET_NAME' already exists at: $NEW_SET_DIR"
+    exit 1
+  fi
+  
+  # Create the new directory
+  mkdir -p "$NEW_SET_DIR"
+  echo "Created entity type set directory: $NEW_SET_DIR"
+  
+  # Generate class name from SET_NAME
+  CLASS_NAME=$(set_name_to_class_name "$SET_NAME")
+  
+  # Create entity file using the custom_entity_example.py as a template
+  ENTITY_FILE="$NEW_SET_DIR/entity.py"
+  TEMPLATE_FILE="$SOURCE_SERVER_DIR/entity_types/example/custom_entity_example.py"
+  
+  # Check if template file exists
+  if [ ! -f "$TEMPLATE_FILE" ]; then
+    echo "Warning: Template file not found: $TEMPLATE_FILE"
+    echo "Creating a minimal entity file instead."
+    
+    # Create a minimal entity file
+    cat > "$ENTITY_FILE" << EOF
+from pydantic import BaseModel, Field
+
+
+class $CLASS_NAME(BaseModel):
+    """Example entity for the '$SET_NAME' set."""
+    
+    example_field: str = Field(
+        ...,
+        description='An example field.',
+    )
+EOF
+  else
+    # Read the template and replace the class name
+    sed -e "s/class Product/class $CLASS_NAME/" \
+        -e "s/A Product/$CLASS_NAME/" \
+        -e "s/products/${SET_NAME}s/" \
+        -e "s/the product/the ${SET_NAME}/" \
+        "$TEMPLATE_FILE" > "$ENTITY_FILE"
+    
+    echo "Created entity file using template: $ENTITY_FILE"
+  fi
+  
+  echo "Entity set '$SET_NAME' successfully created."
+  exit 0
+
+# Handle setup-rules command
+elif [[ "$COMMAND" == "setup-rules" ]]; then
+  PROJECT_NAME="$1"
+  TARGET_DIR="${2:-.}" # Default target directory to current if not provided
+
+  if [ -z "$PROJECT_NAME" ]; then
+    echo "Error: Missing PROJECT_NAME argument."
+    echo "Usage: graphiti setup-rules PROJECT_NAME [TARGET_DIRECTORY]"
+    exit 1
+  fi
+
+  # Validate PROJECT_NAME format (optional, but good practice)
+  if ! [[ "$PROJECT_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "Error: Invalid PROJECT_NAME. Use only letters, numbers, underscores, and hyphens."
+    exit 1
+  fi
+
+  # Define paths - Updated Source Paths
+  CURSOR_RULES_DIR="$TARGET_DIR/.cursor/rules/graphiti"
+  SOURCE_CORE_RULE="$SOURCE_SERVER_DIR/rules/graphiti-mcp-core-rules.md" # Updated path
+  SOURCE_MAINT_RULE="$SOURCE_SERVER_DIR/rules/graphiti-knowledge-graph-maintenance.md" # Updated path
+  TARGET_CORE_RULE_LINK="$CURSOR_RULES_DIR/graphiti-mcp-core-rules.mdc"
+  TARGET_MAINT_RULE_LINK="$CURSOR_RULES_DIR/graphiti-knowledge-graph-maintenance.mdc"
+  TARGET_SCHEMA_FILE="$CURSOR_RULES_DIR/graphiti-$PROJECT_NAME-schema.mdc" # Target file has .mdc extension
+  SCHEMA_TEMPLATE_FILE="$SOURCE_SERVER_DIR/rules/templates/project_schema_template.md" # Updated path, source is .md
+
+  echo "Setting up Graphiti Cursor rules for project '$PROJECT_NAME' in $TARGET_DIR"
+
+  # Create target directory
+  mkdir -p "$CURSOR_RULES_DIR"
+  echo "Created rules directory: $CURSOR_RULES_DIR"
+
+  # Create symlinks (ensure source files exist)
+  if [ ! -f "$SOURCE_CORE_RULE" ]; then
+    echo "Error: Source rule file not found: $SOURCE_CORE_RULE"
+    exit 1
+  fi
+  if [ ! -f "$SOURCE_MAINT_RULE" ]; then
+    echo "Error: Source rule file not found: $SOURCE_MAINT_RULE"
+    exit 1
+  fi
+
+  echo "Linking core rule: $TARGET_CORE_RULE_LINK -> $SOURCE_CORE_RULE"
+  ln -sf "$SOURCE_CORE_RULE" "$TARGET_CORE_RULE_LINK"
+
+  echo "Linking maintenance rule: $TARGET_MAINT_RULE_LINK -> $SOURCE_MAINT_RULE"
+  ln -sf "$SOURCE_MAINT_RULE" "$TARGET_MAINT_RULE_LINK"
+
+  # Generate template project schema file from template (.md -> .mdc)
+  if [ -e "$TARGET_SCHEMA_FILE" ]; then
+    echo "Warning: Project schema file already exists, skipping template generation: $TARGET_SCHEMA_FILE"
+  elif [ ! -f "$SCHEMA_TEMPLATE_FILE" ]; then # Check if template exists
+    echo "Error: Schema template file not found: $SCHEMA_TEMPLATE_FILE"
+    # Optionally create a fallback minimal file or exit
+    exit 1
+  else
+    echo "Generating template project schema file: $TARGET_SCHEMA_FILE"
+    # Read template (.md), replace placeholder, and write to target (.mdc)
+    sed "s/__PROJECT_NAME__/$PROJECT_NAME/g" "$SCHEMA_TEMPLATE_FILE" > "$TARGET_SCHEMA_FILE"
+  fi
+
+  echo "Graphiti Cursor rules setup complete for project '$PROJECT_NAME'."
+  exit 0
+
+# Handle link-dev-files command or default behavior
+elif [[ "$COMMAND" == "link-dev-files" || -z "$COMMAND" ]]; then
+  # Determine Target Directory for dev links
+  TARGET_DIR="${1:-.}" # Use first arg after 'link-dev-files', or default to '.' if no command/args
+  mkdir -p "$TARGET_DIR" # Ensure target directory exists
+
+  # Define Source and Target Paths for dev links
+  SOURCE_ENTITY_TYPES="$SOURCE_SERVER_DIR/entity_types"
+  TARGET_ENTITY_TYPES="$TARGET_DIR/entity_types"
+  SOURCE_DOCKER_COMPOSE="$SOURCE_SERVER_DIR/docker-compose.yml"
+  TARGET_DOCKER_COMPOSE="$TARGET_DIR/docker-compose.yml"
+
+  # Create/Update Symlinks for dev files
+  echo "Linking entity types to $TARGET_ENTITY_TYPES"
+  ln -sf "$SOURCE_ENTITY_TYPES" "$TARGET_ENTITY_TYPES"
+
+  echo "Linking docker-compose.yml to $TARGET_DOCKER_COMPOSE"
+  ln -sf "$SOURCE_DOCKER_COMPOSE" "$TARGET_DOCKER_COMPOSE"
+
+  echo "Graphiti dev links created successfully in $TARGET_DIR."
+  exit 0
+else
+  echo "Error: Unknown command '$COMMAND'"
+  usage
+fi 

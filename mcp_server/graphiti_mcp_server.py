@@ -5,11 +5,14 @@ Graphiti MCP Server - Exposes Graphiti functionality through the Model Context P
 
 import argparse
 import asyncio
+import importlib
+import importlib.util
 import logging
 import os
 import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional, TypedDict, Union, cast
 
 from dotenv import load_dotenv
@@ -28,90 +31,19 @@ from graphiti_core.search.search_config_recipes import (
 )
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
+from mcp_server.entity_types import get_entity_types, get_entity_type_subset
 
 load_dotenv()
 
 DEFAULT_LLM_MODEL = 'gpt-4o'
 
+# The ENTITY_TYPES dictionary is managed by the registry in mcp_server.entity_types
+ENTITY_TYPES = get_entity_types()
 
-class Requirement(BaseModel):
-    """A Requirement represents a specific need, feature, or functionality that a product or service must fulfill.
-
-    Always ensure an edge is created between the requirement and the project it belongs to, and clearly indicate on the
-    edge that the requirement is a requirement.
-
-    Instructions for identifying and extracting requirements:
-    1. Look for explicit statements of needs or necessities ("We need X", "X is required", "X must have Y")
-    2. Identify functional specifications that describe what the system should do
-    3. Pay attention to non-functional requirements like performance, security, or usability criteria
-    4. Extract constraints or limitations that must be adhered to
-    5. Focus on clear, specific, and measurable requirements rather than vague wishes
-    6. Capture the priority or importance if mentioned ("critical", "high priority", etc.)
-    7. Include any dependencies between requirements when explicitly stated
-    8. Preserve the original intent and scope of the requirement
-    9. Categorize requirements appropriately based on their domain or function
-    """
-
-    project_name: str = Field(
-        ...,
-        description='The name of the project to which the requirement belongs.',
-    )
-    description: str = Field(
-        ...,
-        description='Description of the requirement. Only use information mentioned in the context to write this description.',
-    )
-
-
-class Preference(BaseModel):
-    """A Preference represents a user's expressed like, dislike, or preference for something.
-
-    Instructions for identifying and extracting preferences:
-    1. Look for explicit statements of preference such as "I like/love/enjoy/prefer X" or "I don't like/hate/dislike X"
-    2. Pay attention to comparative statements ("I prefer X over Y")
-    3. Consider the emotional tone when users mention certain topics
-    4. Extract only preferences that are clearly expressed, not assumptions
-    5. Categorize the preference appropriately based on its domain (food, music, brands, etc.)
-    6. Include relevant qualifiers (e.g., "likes spicy food" rather than just "likes food")
-    7. Only extract preferences directly stated by the user, not preferences of others they mention
-    8. Provide a concise but specific description that captures the nature of the preference
-    """
-
-    category: str = Field(
-        ...,
-        description="The category of the preference. (e.g., 'Brands', 'Food', 'Music')",
-    )
-    description: str = Field(
-        ...,
-        description='Brief description of the preference. Only use information mentioned in the context to write this description.',
-    )
-
-
-class Procedure(BaseModel):
-    """A Procedure informing the agent what actions to take or how to perform in certain scenarios. Procedures are typically composed of several steps.
-
-    Instructions for identifying and extracting procedures:
-    1. Look for sequential instructions or steps ("First do X, then do Y")
-    2. Identify explicit directives or commands ("Always do X when Y happens")
-    3. Pay attention to conditional statements ("If X occurs, then do Y")
-    4. Extract procedures that have clear beginning and end points
-    5. Focus on actionable instructions rather than general information
-    6. Preserve the original sequence and dependencies between steps
-    7. Include any specified conditions or triggers for the procedure
-    8. Capture any stated purpose or goal of the procedure
-    9. Summarize complex procedures while maintaining critical details
-    """
-
-    description: str = Field(
-        ...,
-        description='Brief description of the procedure. Only use information mentioned in the context to write this description.',
-    )
-
-
-ENTITY_TYPES: dict[str, BaseModel] = {
-    'Requirement': Requirement,  # type: ignore
-    'Preference': Preference,  # type: ignore
-    'Procedure': Procedure,  # type: ignore
-}
+# Predefined entity type sets for different use cases
+REQUIREMENT_ONLY_ENTITY_TYPES = get_entity_type_subset(['Requirement'])
+PREFERENCE_ONLY_ENTITY_TYPES = get_entity_type_subset(['Preference'])
+PROCEDURE_ONLY_ENTITY_TYPES = get_entity_type_subset(['Procedure'])
 
 
 # Type definitions for API responses
@@ -169,6 +101,7 @@ class GraphitiConfig(BaseModel):
     model_name: Optional[str] = None
     group_id: Optional[str] = None
     use_custom_entities: bool = False
+    entity_type_subset: Optional[list[str]] = None
 
     @classmethod
     def from_env(cls) -> 'GraphitiConfig':
@@ -282,16 +215,6 @@ async def initialize_graphiti(llm_client: Optional[LLMClient] = None, destroy_gr
     await graphiti_client.build_indices_and_constraints()
     logger.info('Graphiti client initialized successfully')
 
-    # NEW: Only build indices if we haven't explicitly told it to skip
-    # skip_db_init = os.environ.get("SKIP_DB_INIT", "false").lower() == "true"
-    # if not skip_db_init:
-    #     logger.info("Building indices and constraints...")
-    #     await graphiti_client.build_indices_and_constraints()
-    #     logger.info('Graphiti client initialized successfully (with indices).')
-    # else:
-    #     logger.info('SKIP_DB_INIT=true -> Skipping index creation.')
-    #     logger.info('Graphiti client connected successfully, but did NOT build indices.')
-
 
 def format_fact_result(edge: EntityEdge) -> dict[str, Any]:
     """Format an entity edge into a readable result.
@@ -352,6 +275,7 @@ async def process_episode_queue(group_id: str):
         queue_workers[group_id] = False
         logger.info(f'Stopped episode queue worker for group_id: {group_id}')
 
+
 @mcp.tool()
 async def add_episode(
     name: str,
@@ -360,6 +284,7 @@ async def add_episode(
     source: str = 'text',
     source_description: str = '',
     uuid: Optional[str] = None,
+    entity_type_subset: Optional[list[str]] = None,
 ) -> Union[SuccessResponse, ErrorResponse]:
     """Add an episode to the Graphiti knowledge graph. This is the primary way to add information to the graph.
 
@@ -379,6 +304,8 @@ async def add_episode(
                                - 'message': For conversation-style content
         source_description (str, optional): Description of the source
         uuid (str, optional): Optional UUID for the episode
+        entity_type_subset (list[str], optional): Optional list of entity type names to use for this episode.
+                                                If not provided, uses all entity types if enabled.
 
     Examples:
         # Adding plain text content
@@ -406,6 +333,15 @@ async def add_episode(
             source="message",
             source_description="chat transcript",
             group_id="some_arbitrary_string"
+        )
+
+        # Using a specific subset of entity types
+        add_episode(
+            name="Project Requirements",
+            episode_body="We need to implement user authentication with SSO.",
+            entity_type_subset=["Requirement"],
+            source="text",
+            source_description="meeting notes"
         )
 
     Notes:
@@ -447,8 +383,20 @@ async def add_episode(
         async def process_episode():
             try:
                 logger.info(f"Processing queued episode '{name}' for group_id: {group_id_str}")
-                # Use all entity types if use_custom_entities is enabled, otherwise use empty dict
-                entity_types = ENTITY_TYPES if config.use_custom_entities else {}
+                
+                # Determine which entity types to use based on configuration and parameters
+                if not config.use_custom_entities:
+                    # If custom entities are disabled, use empty dict
+                    entity_types_to_use = {}
+                elif entity_type_subset:
+                    # If a subset is specified in function call, it takes highest precedence
+                    entity_types_to_use = get_entity_type_subset(entity_type_subset)
+                elif config.entity_type_subset:
+                    # If subset is specified via command line, use that
+                    entity_types_to_use = get_entity_type_subset(config.entity_type_subset)
+                else:
+                    # Otherwise use all registered entity types
+                    entity_types_to_use = ENTITY_TYPES
 
                 await client.add_episode(
                     name=name,
@@ -458,7 +406,7 @@ async def add_episode(
                     group_id=group_id_str,  # Using the string version of group_id
                     uuid=uuid,
                     reference_time=datetime.now(timezone.utc),
-                    entity_types=entity_types,
+                    entity_types=entity_types_to_use,
                 )
                 logger.info(f"Episode '{name}' added successfully")
 
@@ -817,16 +765,6 @@ async def get_status() -> StatusResponse:
         }
 
 
-@mcp.resource('http://graphiti/health')
-async def health_check() -> dict[str, str]:
-    """Simple health check endpoint for the Graphiti MCP server.
-    
-    Returns a 200 OK response if the server is running, regardless of Neo4j connection.
-    This allows for lightweight monitoring and container orchestration health checks.
-    """
-    return {'status': 'ok'}
-
-
 def create_llm_client(api_key: Optional[str] = None, model: Optional[str] = None) -> LLMClient:
     """Create an OpenAI LLM client.
 
@@ -874,6 +812,18 @@ async def initialize_server() -> MCPConfig:
         action='store_true',
         help='Enable entity extraction using the predefined ENTITY_TYPES',
     )
+    # Add argument for specifying entity types
+    parser.add_argument(
+        '--entity-types',
+        nargs='+',
+        help='Specify which entity types to use (e.g., --entity-types Requirement Preference). '
+        'If not provided but --use-custom-entities is set, all registered entity types will be used.',
+    )
+    # Add argument for custom entity type directory
+    parser.add_argument(
+        '--entity-type-dir',
+        help='Directory containing custom entity type modules to load'
+    )
 
     args = parser.parse_args()
 
@@ -885,13 +835,33 @@ async def initialize_server() -> MCPConfig:
         config.group_id = f'graph_{uuid.uuid4().hex[:8]}'
         logger.info(f'Generated random group_id: {config.group_id}')
 
+    # Load custom entity types if directory is specified
+    if args.entity_type_dir:
+        logger.info(f'Loading custom entity types from: {args.entity_type_dir}')
+        load_entity_types_from_directory(args.entity_type_dir)
+        
+    # Always load built-in entity types from entity_types/base
+    base_dir = os.path.join(os.path.dirname(__file__), 'entity_types/base')
+    if os.path.exists(base_dir):
+        logger.info('Loading built-in entity types')
+        load_entity_types_from_directory(base_dir)
+
     # Set use_custom_entities flag if specified
     if args.use_custom_entities:
         config.use_custom_entities = True
         logger.info('Entity extraction enabled using predefined ENTITY_TYPES')
     else:
         logger.info('Entity extraction disabled (no custom entities will be used)')
-
+        
+    # Store the entity types to use if specified
+    if args.entity_types:
+        config.entity_type_subset = args.entity_types
+        logger.info(f'Using entity types: {", ".join(args.entity_types)}')
+    else:
+        config.entity_type_subset = None
+        if config.use_custom_entities:
+            logger.info('Using all registered entity types')
+        
     llm_client = None
 
     # Create OpenAI client if model is specified or if OPENAI_API_KEY is available
@@ -933,6 +903,56 @@ def main():
     except Exception as e:
         logger.error(f'Error initializing Graphiti MCP server: {str(e)}')
         raise
+
+
+def load_entity_types_from_directory(directory_path: str) -> None:
+    """Load all Python modules in the specified directory as entity types.
+    
+    This function dynamically imports all Python files in the specified directory,
+    and automatically registers any Pydantic BaseModel classes that have docstrings.
+    No explicit imports or registration calls are needed in the entity type files.
+    
+    Args:
+        directory_path: Path to the directory containing entity type modules
+    """
+    directory = Path(directory_path)
+    if not directory.exists() or not directory.is_dir():
+        logger.warning(f"Entity types directory {directory_path} does not exist or is not a directory")
+        return
+        
+    # Find all Python files in the directory
+    for file_path in directory.glob('*.py'):
+        if file_path.name.startswith('__'):
+            continue  # Skip __init__.py and similar files
+            
+        module_name = file_path.stem
+        full_module_path = str(file_path.absolute())
+        
+        try:
+            # Dynamically import the module
+            spec = importlib.util.spec_from_file_location(module_name, full_module_path)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                
+                # Look for BaseModel classes in the module
+                for attribute_name in dir(module):
+                    attribute = getattr(module, attribute_name)
+                    
+                    # Check if it's a class and a subclass of BaseModel
+                    if (isinstance(attribute, type) and 
+                        issubclass(attribute, BaseModel) and 
+                        attribute != BaseModel and
+                        attribute.__doc__):  # Only consider classes with docstrings
+                        
+                        # Register the entity type
+                        from mcp_server.entity_types import register_entity_type
+                        register_entity_type(attribute_name, attribute)
+                        logger.info(f"Auto-registered entity type: {attribute_name}")
+                
+                logger.info(f"Successfully loaded entity type module: {module_name}")
+        except Exception as e:
+            logger.error(f"Error loading entity type module {module_name}: {str(e)}")
 
 
 if __name__ == '__main__':
