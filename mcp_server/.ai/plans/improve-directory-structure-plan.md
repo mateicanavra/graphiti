@@ -1,6 +1,6 @@
 **Objective:** Refactor the `mcp_server` entity type management for improved modularity, auto-discovery, and reusability across projects. Also, establish a robust system for guiding AI agents via Cursor rules.
 
-**Status: Phase 1 Complete, Phase 1 Cleanup Complete, Phase 2 Complete, Phase 2b Complete**
+**Status: Phase 1 Complete, Phase 1 Cleanup Complete, Phase 2 Complete, Phase 2b Complete, Phase 2c Complete**
 
 **1. Directory Structure & Registry Logic Implementation:**
 
@@ -54,6 +54,21 @@ The following refinements have been implemented for enhanced clarity and adheren
     *   **Testing:** Manual verification of file structure and script logic.
 *   **Outcome:** A well-defined AI guidance system is in place, and the `graphiti setup-rules` command automates its deployment into user projects.
 
+**4c. Phase 2c - `graphiti` Script Testing & Bug Fixes: COMPLETED ✓**
+
+*   **Objective:** Test the new `graphiti init` command and ensure it correctly performs both file linking and rule setup functions.
+*   **Implementation:**
+    *   **Issue Identification:** During testing, discovered that the helper functions (`_link_dev_files` and `_setup_rules`) were defined after they were called in the script, causing a "command not found" error.
+    *   **Bug Fix:** Moved the function definitions to earlier in the script, before the command parsing logic, following the principle that in Bash functions must be defined before they're called.
+    *   **Testing Methodology:** 
+        *   Created a test directory on the desktop (`~/Desktop/graphiti_test`)
+        *   Set the required environment variable (`MCP_GRAPHITI_REPO_PATH`)
+        *   Ran the `graphiti init test-project .` command
+        *   Verified correct creation of symlinks and rule files
+        *   Validated proper substitution of project name in schema template
+    *   **Cleanup:** Removed test directory after successful validation
+*   **Outcome:** The `graphiti init` command now works correctly, properly orchestrating both the `link-dev-files` and `setup-rules` functionality in a single command for streamlined project setup.
+
 **5. Plan for Testing Auto-Loading via Docker Compose (Phase 3 - NEXT):**
 
 *   **Objective:** Verify that the `--entity-type-dir` argument correctly limits the auto-loading scope when running services via Docker Compose.
@@ -68,5 +83,5 @@ The following refinements have been implemented for enhanced clarity and adheren
 
 **Next Steps:**
 
-1.  **Testing `graphiti setup-rules`:** Perform a functional test of the new `graphiti setup-rules` command in a clean temporary directory to ensure it creates the correct structure, links, and files.
+1.  **Testing `graphiti setup-rules`:** Perform a functional test of the new `graphiti setup-rules` command in a clean temporary directory to ensure it creates the correct structure, links, and files. **COMPLETED ✓**
 2.  **Implement Phase 3:** Modify `docker-compose.yml` and perform auto-loading testing as outlined above.

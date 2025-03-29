@@ -14,8 +14,10 @@ ENV PATH="/root/.local/bin:${PATH}"
 COPY pyproject.toml .
 RUN uv sync
 
-# Copy application code
-COPY graphiti_mcp_server.py .
+# Copy necessary application code and directories into /app/
+# The destination must end with '/' when copying directories
+COPY graphiti_mcp_server.py ./
+COPY entity_types/ ./entity_types/
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

@@ -1,6 +1,6 @@
 ---
 description: Use this rule first for general guidance on using Graphiti MCP server tools (entity extraction, memory). It explains the overall rule structure and links to project-specific schemas and maintenance procedures.
-globs: **/*.py, **/*.md
+globs: 
 alwaysApply: false
 ---
 
@@ -87,14 +87,14 @@ For effective project work, be aware of the three key types of Graphiti rules:
 Maintaining a knowledge graph requires diligence. The goal is not just to store data, but to create a useful, accurate, and evolving representation of knowledge.
 
 *   **Graphiti Project:** This MCP server leverages the Graphiti framework. Understanding its core concepts is beneficial.
-    *   [Graphiti GitHub Repository](https://github.com/getzep/Graphiti)
-    *   [Graphiti Documentation & Guides](https://help.getzep.com/graphiti)
-    *   Graphiti powers [Zep Agent Memory](https://www.getzep.com), detailed in the paper: [Zep: A Temporal Knowledge Graph Architecture for Agent Memory](https://arxiv.org/abs/2501.13956).
+    *   [Graphiti GitHub Repository](mdc:https:/github.com/getzep/Graphiti)
+    *   [Graphiti Documentation & Guides](mdc:https:/help.getzep.com/graphiti)
+    *   Graphiti powers [Zep Agent Memory](mdc:https:/www.getzep.com), detailed in the paper: [Zep: A Temporal Knowledge Graph Architecture for Agent Memory](mdc:https:/arxiv.org/abs/2501.13956).
 *   **Neo4j Database:** Graphiti uses Neo4j (v5.26+) as its backend storage.
-    *   [Neo4j Developer Documentation](https://neo4j.com/docs/getting-started/current/)
-    *   [Neo4j Desktop](https://neo4j.com/download/) (Recommended for local development)
+    *   [Neo4j Developer Documentation](mdc:https:/neo4j.com/docs/getting-started/current)
+    *   [Neo4j Desktop](mdc:https:/neo4j.com/download) (Recommended for local development)
 *   **Knowledge Graph Principles:** Building and maintaining knowledge graphs involves careful planning and iteration.
-    *   **Defining Scope & Entities:** Clearly define the purpose, scope, entities, and relationships for your graph. ([Source: pageon.ai](https://www.pageon.ai/blog/how-to-build-a-knowledge-graph), [Source: smythos.com](https://smythos.com/ai-agents/ai-tutorials/knowledge-graph-tutorial/))
-    *   **Maintenance & Validation:** Regularly assess the graph's accuracy and usefulness. Ensure data validity and consistency. Schemas evolve, so plan for iteration. ([Source: stardog.com](https://www.stardog.com/building-a-knowledge-graph/))
+    *   **Defining Scope & Entities:** Clearly define the purpose, scope, entities, and relationships for your graph. ([Source: pageon.ai](mdc:https:/www.pageon.ai/blog/how-to-build-a-knowledge-graph), [Source: smythos.com](mdc:https:/smythos.com/ai-agents/ai-tutorials/knowledge-graph-tutorial))
+    *   **Maintenance & Validation:** Regularly assess the graph's accuracy and usefulness. Ensure data validity and consistency. Schemas evolve, so plan for iteration. ([Source: stardog.com](mdc:https:/www.stardog.com/building-a-knowledge-graph))
 
 Use the specific rules defined in `@graphiti-knowledge-graph-maintenance.md` when proposing changes to project schemas.

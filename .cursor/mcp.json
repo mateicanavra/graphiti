@@ -7,6 +7,18 @@
 		"graphiti-civ7": {
 			"transport": "sse",
 			"url": "http://localhost:8001/sse"
+		},
+		"graphiti-core": {
+			"transport": "sse",
+			"url": "http://localhost:8002/sse"
+		},
+		"graphiti-repo-filesystem": {
+			"command": "node",
+			"args": [
+				"/Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/dist/index.js",
+				"~/Documents/.nosync/DEV/mcp-servers/mcp-graphiti/",
+				"--readonly"
+			]
 		}
 	}
 }

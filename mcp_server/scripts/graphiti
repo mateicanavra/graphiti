@@ -10,6 +10,8 @@ usage() {
   echo "  add-entities SET_NAME          Create a new entity type set with an example entity in the mcp-graphiti repo."
   echo "  setup-rules PROJECT_NAME [DIR] Setup Cursor rules (.mdc files) for Graphiti in a target project directory."
   echo "  link-dev-files [DIR]           (Default if no command) Create dev symlinks (entity_types, docker-compose.yml)."
+  echo "  up [-d]                        Start all containers using docker compose. Use -d for detached mode."
+  echo "  down                           Stop and remove all containers using docker compose."
   echo
   echo "Arguments for init & setup-rules:"
   echo "  PROJECT_NAME  Name of the target project (used for schema filename)."
@@ -20,6 +22,7 @@ usage() {
   echo
   echo "Options:"
   echo "  -h, --help        Show this help message and exit."
+  echo "  -d                Run containers in detached mode (background) with 'up' command."
   echo
   echo "Prerequisites:"
   echo "  The MCP_GRAPHITI_REPO_PATH environment variable must be set to the"
@@ -123,6 +126,115 @@ _setup_rules() {
   echo "Graphiti Cursor rules setup complete for project '$PROJECT_NAME'."
 }
 
+# Function to find the repository path based on script location
+detect_repo_path() {
+  # Get the real path of the script (resolving any symlinks)
+  local SCRIPT_PATH=""
+  
+  # First attempt - use readlink if available
+  if command -v readlink >/dev/null 2>&1; then
+    # Check if readlink -f is supported (Linux/BSD)
+    if readlink -f / >/dev/null 2>&1; then
+      SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "$0" 2>/dev/null)
+    else
+      # For macOS, which doesn't support readlink -f
+      SCRIPT_PATH=$(perl -MCwd -e 'print Cwd::abs_path shift' "${BASH_SOURCE[0]}" 2>/dev/null || perl -MCwd -e 'print Cwd::abs_path shift' "$0" 2>/dev/null)
+    fi
+  fi
+  
+  # Fallback if readlink or perl failed
+  if [ -z "$SCRIPT_PATH" ]; then
+    SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
+  fi
+  
+  echo "Debug: Script path resolved to: $SCRIPT_PATH" >&2
+  
+  # Get the script directory
+  local SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+  echo "Debug: Script directory: $SCRIPT_DIR" >&2
+  
+  # Check if we're in the expected directory structure
+  # We know the script should be in mcp_server/scripts/
+  # First possibility: script is executed from its original location
+  if [[ "$SCRIPT_DIR" == */mcp_server/scripts ]]; then
+    # Go up two levels to get the repo root
+    local REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+    echo "Debug: Detected repo root (direct): $REPO_ROOT" >&2
+    
+    if [ -d "$REPO_ROOT/mcp_server" ] && [ -d "$REPO_ROOT/mcp_server/entity_types" ]; then
+      echo "$REPO_ROOT"
+      return 0
+    fi
+  fi
+  
+  # Second possibility: we need to search for the repo structure
+  # Try the current directory first
+  local CURRENT_DIR="$(pwd)"
+  echo "Debug: Checking current directory: $CURRENT_DIR" >&2
+  
+  if [ -d "$CURRENT_DIR/mcp_server" ] && [ -d "$CURRENT_DIR/mcp_server/entity_types" ]; then
+    echo "Debug: Found repo structure in current directory" >&2
+    echo "$CURRENT_DIR"
+    return 0
+  fi
+  
+  # Try one level up (in case we're in a subdirectory of the repo)
+  local PARENT_DIR="$(cd .. && pwd)"
+  echo "Debug: Checking parent directory: $PARENT_DIR" >&2
+  
+  if [ -d "$PARENT_DIR/mcp_server" ] && [ -d "$PARENT_DIR/mcp_server/entity_types" ]; then
+    echo "Debug: Found repo structure in parent directory" >&2
+    echo "$PARENT_DIR"
+    return 0
+  fi
+  
+  # If we got here, we couldn't find the repo root
+  echo "Debug: Could not find repository structure" >&2
+  return 1
+}
+
+# Function to offer saving the path to shell config
+save_path_to_shell_config() {
+  local PATH_TO_SAVE="$1"
+  local CONFIG_FILE=""
+  
+  # Detect which shell config file to use
+  if [ -n "$BASH_VERSION" ]; then
+    CONFIG_FILE="$HOME/.bashrc"
+  elif [ -n "$ZSH_VERSION" ]; then
+    CONFIG_FILE="$HOME/.zshrc"
+  else
+    # Try to detect shell from process
+    local SHELL_NAME="$(basename "$SHELL")"
+    case "$SHELL_NAME" in
+      bash) CONFIG_FILE="$HOME/.bashrc" ;;
+      zsh) CONFIG_FILE="$HOME/.zshrc" ;;
+      *) 
+        echo "Could not determine your shell configuration file."
+        echo "Please manually add the following line to your shell configuration:"
+        echo "export MCP_GRAPHITI_REPO_PATH=\"$PATH_TO_SAVE\""
+        return 1
+        ;;
+    esac
+  fi
+  
+  # Ask user for confirmation before modifying their shell config
+  echo -n "Would you like to permanently save MCP_GRAPHITI_REPO_PATH=\"$PATH_TO_SAVE\" to $CONFIG_FILE? (y/n): "
+  read -r CONFIRM
+  
+  if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
+    echo "" >> "$CONFIG_FILE"
+    echo "# Added by graphiti script" >> "$CONFIG_FILE"
+    echo "export MCP_GRAPHITI_REPO_PATH=\"$PATH_TO_SAVE\"" >> "$CONFIG_FILE"
+    echo "Path saved to $CONFIG_FILE. Please restart your terminal or run 'source $CONFIG_FILE' to apply."
+    return 0
+  else
+    echo "Path not saved. You'll need to set MCP_GRAPHITI_REPO_PATH manually each time."
+    echo "You can do this by running: export MCP_GRAPHITI_REPO_PATH=\"$PATH_TO_SAVE\""
+    return 1
+  fi
+}
+
 # Check for help flag
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
   usage
@@ -130,9 +242,23 @@ fi
 
 # 1. Check and Determine Source Path
 if [ -z "$MCP_GRAPHITI_REPO_PATH" ]; then
-  echo "Error: MCP_GRAPHITI_REPO_PATH environment variable is not set."
-  echo
-  usage # Show usage instructions if variable is missing
+  echo "MCP_GRAPHITI_REPO_PATH is not set. Attempting to auto-detect..."
+  
+  # Try to auto-detect the repository path based on script location
+  AUTO_DETECTED_PATH=$(detect_repo_path)
+  
+  if [ -n "$AUTO_DETECTED_PATH" ]; then
+    echo "Detected repository path: $AUTO_DETECTED_PATH"
+    export MCP_GRAPHITI_REPO_PATH="$AUTO_DETECTED_PATH"
+    
+    # Offer to save it permanently
+    save_path_to_shell_config "$AUTO_DETECTED_PATH"
+  else
+    echo "Error: Could not auto-detect the repository path."
+    echo "Please set the MCP_GRAPHITI_REPO_PATH environment variable manually."
+    echo "Example: export MCP_GRAPHITI_REPO_PATH=/path/to/mcp-graphiti"
+    exit 1
+  fi
 fi
 
 SOURCE_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
@@ -164,6 +290,73 @@ if [[ "$COMMAND" == "init" ]]; then
   _setup_rules "$PROJECT_NAME" "$TARGET_DIR"
 
   echo "Graphiti project '$PROJECT_NAME' initialization complete."
+  exit 0
+
+elif [[ "$COMMAND" == "up" ]]; then
+  # Check for detached mode flag
+  DETACHED=""
+  if [[ "$1" == "-d" ]]; then
+    DETACHED="-d"
+    shift
+  fi
+
+  # We need to run docker-compose from the mcp_server directory
+  MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
+  
+  if [ ! -d "$MCP_SERVER_DIR" ]; then
+    echo "Error: mcp_server directory not found at $MCP_SERVER_DIR"
+    exit 1
+  fi
+
+  # Save current directory to return to it afterwards
+  CURRENT_DIR=$(pwd)
+  
+  echo "Starting Graphiti containers with docker compose..."
+  echo "This will rebuild containers to incorporate any changes."
+  echo "Running Docker Compose from: $MCP_SERVER_DIR"
+  
+  # Change to mcp_server directory where docker-compose.yml is located
+  cd "$MCP_SERVER_DIR"
+  
+  # Run docker compose up with build and force-recreate flags
+  if [ -n "$DETACHED" ]; then
+    echo "Running in detached mode."
+    docker compose up --build --force-recreate -d
+  else
+    docker compose up --build --force-recreate
+  fi
+  
+  # Return to original directory
+  cd "$CURRENT_DIR"
+  
+  echo "Docker compose up completed."
+  exit 0
+
+elif [[ "$COMMAND" == "down" ]]; then
+  # We need to run docker-compose from the mcp_server directory
+  MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
+  
+  if [ ! -d "$MCP_SERVER_DIR" ]; then
+    echo "Error: mcp_server directory not found at $MCP_SERVER_DIR"
+    exit 1
+  fi
+
+  # Save current directory to return to it afterwards
+  CURRENT_DIR=$(pwd)
+  
+  echo "Stopping and removing Graphiti containers..."
+  echo "Running Docker Compose from: $MCP_SERVER_DIR"
+  
+  # Change to mcp_server directory where docker-compose.yml is located
+  cd "$MCP_SERVER_DIR"
+  
+  # Run docker compose down to stop and remove containers
+  docker compose down
+  
+  # Return to original directory
+  cd "$CURRENT_DIR"
+  
+  echo "Docker compose down completed."
   exit 0
 
 elif [[ "$COMMAND" == "add-entities" ]]; then

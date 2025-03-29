@@ -31,7 +31,7 @@ from graphiti_core.search.search_config_recipes import (
 )
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
-from mcp_server.entity_types import get_entity_types, get_entity_type_subset
+from entity_types import get_entity_types, get_entity_type_subset, register_entity_type
 
 load_dotenv()
 
@@ -946,7 +946,6 @@ def load_entity_types_from_directory(directory_path: str) -> None:
                         attribute.__doc__):  # Only consider classes with docstrings
                         
                         # Register the entity type
-                        from mcp_server.entity_types import register_entity_type
                         register_entity_type(attribute_name, attribute)
                         logger.info(f"Auto-registered entity type: {attribute_name}")
                 
