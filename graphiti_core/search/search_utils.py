@@ -111,7 +111,10 @@ async def get_mentioned_nodes(
     )
 
     nodes = [get_entity_node_from_record(record) for record in records]
-
+    # Ensure all nodes have valid summaries (not None)
+    for node in nodes:
+        if node.summary is None:
+            node.summary = ""
     return nodes
 
 
@@ -370,6 +373,11 @@ async def node_fulltext_search(
     )
     nodes = [get_entity_node_from_record(record) for record in records]
 
+    # Ensure all nodes have valid summaries (not None)
+    for node in nodes:
+        if node.summary is None:
+            node.summary = ""
+
     return nodes
 
 
@@ -428,6 +436,11 @@ async def node_similarity_search(
     )
     nodes = [get_entity_node_from_record(record) for record in records]
 
+    # Ensure all nodes have valid summaries (not None)
+    for node in nodes:
+        if node.summary is None:
+            node.summary = ""
+
     return nodes
 
 
@@ -471,6 +484,11 @@ async def node_bfs_search(
         routing_='r',
     )
     nodes = [get_entity_node_from_record(record) for record in records]
+
+    # Ensure all nodes have valid summaries (not None)
+    for node in nodes:
+        if node.summary is None:
+            node.summary = ""
 
     return nodes
 
@@ -629,6 +647,11 @@ async def hybrid_node_search(
     ranked_uuids = rrf(result_uuids)
 
     relevant_nodes: list[EntityNode] = [node_uuid_map[uuid] for uuid in ranked_uuids]
+
+    # Ensure all nodes have valid summaries (not None)
+    for node in relevant_nodes:
+        if node.summary is None:
+            node.summary = ""
 
     end = time()
     logger.debug(f'Found relevant nodes: {ranked_uuids} in {(end - start) * 1000} ms')

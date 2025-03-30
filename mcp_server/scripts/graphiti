@@ -269,6 +269,41 @@ validate_log_level() {
   esac
 }
 
+# Function to ensure dist directory is available for Docker build
+ensure_dist_for_build() {
+  echo -e "${BOLD}Checking build configuration...${NC}"
+  
+  # Check if we're using local wheel in pyproject.toml
+  if ! grep -q "graphiti-core @ file:///dist/" "$MCP_GRAPHITI_REPO_PATH/mcp_server/pyproject.toml" || \
+     grep -q "^[^#]*graphiti-core>=" "$MCP_GRAPHITI_REPO_PATH/mcp_server/pyproject.toml"; then
+    echo -e "${CYAN}Using published graphiti-core package. Skipping local wheel setup.${NC}"
+    return 0
+  fi
+  
+  echo -e "${CYAN}Local graphiti-core wheel configuration detected.${NC}"
+  
+  # Source and target paths
+  local REPO_DIST="$MCP_GRAPHITI_REPO_PATH/dist"
+  local SERVER_DIST="$MCP_GRAPHITI_REPO_PATH/mcp_server/dist"
+  
+  # Check if source dist exists
+  if [ ! -d "$REPO_DIST" ]; then
+    echo -e "${RED}Error: dist directory not found at $REPO_DIST${NC}"
+    echo -e "Please build the graphiti-core wheel first."
+    return 1
+  fi
+  
+  # Create target directory if needed
+  mkdir -p "$SERVER_DIST"
+  
+  # Copy wheel files
+  echo -e "Copying wheel files from ${CYAN}$REPO_DIST${NC} to ${CYAN}$SERVER_DIST${NC}"
+  cp -f "$REPO_DIST"/*.whl "$SERVER_DIST/"
+  
+  echo -e "${GREEN}Dist directory prepared for Docker build.${NC}"
+  return 0
+}
+
 # Check for help flag
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
   usage
@@ -375,6 +410,9 @@ elif [[ "$COMMAND" == "up" ]]; then
     echo -e "Setting log level to: ${CYAN}$LOG_LEVEL_OVERRIDE${NC}"
     export GRAPHITI_LOG_LEVEL="$LOG_LEVEL_OVERRIDE"
   fi
+  
+  # Ensure dist directory is ready for build
+  ensure_dist_for_build || exit 1
   
   # Run docker compose up with build and force-recreate flags
   if [ -n "$DETACHED" ]; then
@@ -495,6 +533,9 @@ elif [[ "$COMMAND" == "restart" ]]; then
   # First run docker compose down
   echo -e "${CYAN}Stopping containers...${NC}"
   docker compose down
+  
+  # Ensure dist directory is ready for build
+  ensure_dist_for_build || exit 1
   
   # Then run docker compose up
   echo -e "${CYAN}Starting containers...${NC}"

@@ -10,6 +10,12 @@ RUN apt-get update && apt-get install -y curl && \
 # Add uv to PATH
 ENV PATH="/root/.local/bin:${PATH}"
 
+# Create dist directory first
+RUN mkdir -p /dist/
+
+# Copy the dist directory with our local wheel to container root (if it exists)
+COPY dist/* /dist/
+
 # Copy pyproject.toml and install dependencies
 COPY pyproject.toml .
 RUN uv sync

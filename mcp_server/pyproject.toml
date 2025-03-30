@@ -7,5 +7,8 @@ requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.5.0",
     "openai>=1.68.2",
-    "graphiti-core>=0.8.2",
+    # For local development with local graphiti-core wheel:
+    # "graphiti-core @ file:///dist/graphiti_core-0.8.5-py3-none-any.whl",
+    # For production/normal use (uncomment this and comment out the above):
+    "graphiti-core>=0.8.5",
 ]
