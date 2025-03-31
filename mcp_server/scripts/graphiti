@@ -270,6 +270,12 @@ validate_log_level() {
 }
 
 # Function to ensure dist directory is available for Docker build
+#
+# This function checks if the graphiti-core package is configured to use a local wheel
+# If so, it ensures the dist directory exists and copies the wheel files to the mcp_server/dist directory
+# This is used to ensure the graphiti-core package is built and available for use in the Docker containers
+#
+# If the graphiti-core package is configured to use the published package, this function will return 0 and no action will be taken
 ensure_dist_for_build() {
   echo -e "${BOLD}Checking build configuration...${NC}"
   

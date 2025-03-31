@@ -1,3 +1,4 @@
+# docker-compose.yml
 version: "3.8"
 
 # --- Base Definitions ---
@@ -35,7 +36,7 @@ x-graphiti-mcp-base: &graphiti-mcp-base
         dockerfile: Dockerfile # Assumes Dockerfile sets up the entrypoint script
     env_file:
         - path: .env
-          required: true # Required by default
+          required: false
     environment:
         # Merge common MCP env and neo4j connection details
         <<: [*mcp-env, *neo4j-connection]
@@ -48,10 +49,10 @@ x-graphiti-mcp-base: &graphiti-mcp-base
 x-graphiti-mcp-custom-base: &graphiti-mcp-custom-base
     <<: *graphiti-mcp-base # Inherit all properties from the main base
     depends_on:
-        # Custom servers depend on both Neo4j and the Root MCP server being healthy
+        # Custom servers depend on both Neo4j and the Core MCP server being healthy
         neo4j:
             condition: service_healthy
-        graphiti-mcp-root:
+        graphiti-mcp-core:
             condition: service_healthy
     # Environment variables specific to custom servers (added per-service) configure the entrypoint script
 
@@ -89,69 +90,53 @@ services:
             retries: 5
             start_period: 30s
 
-    # --- Root MCP Server (Required) ---
-    # This is the primary MCP server instance required for all setups
-    graphiti-mcp-root:
-        <<: *graphiti-mcp-base
-        container_name: ${MCP_ROOT_CONTAINER_NAME:-graphiti-mcp-root}
+    # --- Core MCP Server (Required) ---
+    graphiti-mcp-core:
+        <<: *graphiti-mcp-base # Inherits from the main MCP base
+        container_name: ${MCP_CORE_CONTAINER_NAME:-graphiti-mcp-core}
         depends_on:
             neo4j:
                 condition: service_healthy
         ports:
-            - "${MCP_ROOT_HOST_PORT:-8000}:${MCP_ROOT_CONTAINER_PORT:-8000}"
+            # Map host port to the default/env var internal MCP port
+            - "${MCP_HOST_PORT_CORE:-8000}:${MCP_ROOT_CONTAINER_PORT:-8000}"
         environment:
-            # Configuration for entrypoint.sh
-            MCP_GROUP_ID: "root" # Unique group ID for this MCP instance
+            # --- Configuration for entrypoint.sh ---
+            MCP_GROUP_ID: "core-api"
             MCP_USE_CUSTOM_ENTITIES: "true"
             MCP_ENTITY_TYPE_DIR: "entity_types/base"
-            # MCP_ENTITY_TYPES: "" # Use this to specify specific entity types
-            # NEO4J_DESTROY_ENTIRE_GRAPH can be set to "true" to clear ALL Neo4j data (DANGER!)
-            # Not recommended to define here - use .env temporarily if needed
+            # MCP_ENTITY_TYPES: "" # Explicitly empty/unset
+            MCP_DESTROY_GRAPH: "false" # Default to false
 
-    # --- Civilization 7 MCP Server ---
-    mcp-civ7:
+    # --- Custom MCP Server Example 1 (Optional Template) ---
+    graphiti-mcp-custom-1:
         <<: *graphiti-mcp-custom-base # Inherit from the CUSTOM MCP base
-        container_name: ${CIV7_CONTAINER_NAME}
+        container_name: ${MCP_CUSTOM_1_CONTAINER_NAME:-graphiti-mcp-custom-1}
         ports:
-            - "${CIV7_PORT}:${MCP_ROOT_CONTAINER_PORT:-8000}"
+            - "${MCP_CUSTOM_HOST_PORT_1:-8001}:${MCP_ROOT_CONTAINER_PORT:-8000}"
         environment:
             # --- Configuration for entrypoint.sh ---
-            MCP_GROUP_ID: "civ7"
+            MCP_GROUP_ID: "custom-group-1"
             MCP_USE_CUSTOM_ENTITIES: "true"
-            MCP_ENTITY_TYPE_DIR: "entity_types/example"
+            MCP_ENTITY_TYPE_DIR: "entity_types/custom_1"
             # MCP_ENTITY_TYPES: ""
-            # NEO4J_DESTROY_ENTIRE_GRAPH can be set to "true" to clear ALL Neo4j data
-            # Not recommended to define here - use .env temporarily if needed
+            MCP_DESTROY_GRAPH: "false" # Default to false
 
-    # --- Filesystem MCP Server ---
-    mcp-filesystem:
+    # --- Custom MCP Server Example 2 (Optional Template) ---
+    graphiti-mcp-custom-2:
         <<: *graphiti-mcp-custom-base # Inherit from the CUSTOM MCP base
-        container_name: ${FILESYSTEM_CONTAINER_NAME}
+        container_name: ${MCP_CUSTOM_2_CONTAINER_NAME:-graphiti-mcp-custom-2}
         ports:
-            - "${FILESYSTEM_PORT}:${MCP_ROOT_CONTAINER_PORT:-8000}"
+            - "${MCP_CUSTOM_HOST_PORT_2:-8002}:${MCP_ROOT_CONTAINER_PORT:-8000}"
         environment:
             # --- Configuration for entrypoint.sh ---
-            MCP_GROUP_ID: "filesystem"
+            MCP_GROUP_ID: "another-custom-group"
             MCP_USE_CUSTOM_ENTITIES: "true"
             # MCP_ENTITY_TYPE_DIR: ""
-            MCP_ENTITY_TYPES: "Requirement Preference"
-            # NEO4J_DESTROY_ENTIRE_GRAPH can be set to "true" to clear ALL Neo4j data
-            # Not recommended to define here - use .env temporarily if needed
+            MCP_ENTITY_TYPES: "SpecificTypeA SpecificTypeB"
+            MCP_DESTROY_GRAPH: "false" # Default to false
 
-    # --- Magic Candidates MCP Server ---
-    mcp-candidates:
-        <<: *graphiti-mcp-custom-base # Inherit from the CUSTOM MCP base
-        container_name: ${CANDIDATES_CONTAINER_NAME}
-        ports:
-            - "${CANDIDATES_PORT}:${MCP_ROOT_CONTAINER_PORT:-8000}"
-        environment:
-            # --- Configuration for entrypoint.sh ---
-            MCP_GROUP_ID: "graphiti-candidates"
-            MCP_USE_CUSTOM_ENTITIES: "true"
-            MCP_ENTITY_TYPE_DIR: "entity_types/candidates"
-            # MCP_ENTITY_TYPES: ""
-            # NEO4J_DESTROY_ENTIRE_GRAPH can be set to "true" to clear ALL Neo4j data
-            # Not recommended to define here - use .env temporarily if needed
+    # --- Add more custom MCP server definitions below following the pattern ---
 
 # --- Volumes ---
 volumes:

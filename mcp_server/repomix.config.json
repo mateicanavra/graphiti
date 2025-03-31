@@ -1,6 +1,6 @@
 {
   "output": {
-    "filePath": "graphiti-repo.md",
+    "filePath": "graphiti-mcp-server.md",
     "style": "markdown",
     "parsableStyle": false,
     "fileSummary": true,
@@ -22,7 +22,8 @@
     "useDefaultPatterns": true,
     "customPatterns": [
       ".venv/**",
-      "uv.lock"
+      "uv.lock",
+      "dist/**"
     ]
   },
   "security": {

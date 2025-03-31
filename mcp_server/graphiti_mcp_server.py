@@ -95,7 +95,8 @@ class GraphitiConfig(BaseModel):
     including database connection details and LLM settings.
     """
 
-    neo4j_uri: str = 'bolt://localhost:7687'
+    # neo4j_uri: str = 'bolt://localhost:7687'
+    neo4j_uri: str = 'bolt://neo4j:7687'
     neo4j_user: str = 'neo4j'
     neo4j_password: str = 'password'
     openai_api_key: Optional[str] = None
@@ -109,7 +110,8 @@ class GraphitiConfig(BaseModel):
     def from_env(cls) -> 'GraphitiConfig':
         """Create a configuration instance from environment variables."""
         return cls(
-            neo4j_uri=os.environ.get('NEO4J_URI', 'bolt://localhost:7687'),
+            # neo4j_uri=os.environ.get('NEO4J_URI', 'bolt://localhost:7687'),
+            neo4j_uri=os.environ.get('NEO4J_URI', 'bolt://neo4j:7687'),
             neo4j_user=os.environ.get('NEO4J_USER', 'neo4j'),
             neo4j_password=os.environ.get('NEO4J_PASSWORD', 'password'),
             openai_api_key=os.environ.get('OPENAI_API_KEY'),
