@@ -268,3 +268,104 @@ The integration enables AI assistants in Cursor to maintain persistent memory th
 ## License
 
 This project is licensed under the same license as the Graphiti project.
+
+# Graphiti MCP Docker Compose Configuration
+
+This directory contains a dynamic Docker Compose configuration system for Graphiti MCP servers. The system separates static configuration from dynamic server definitions, making it easier to maintain and extend.
+
+## Configuration Files
+
+- **base-compose.yaml**: Contains the static parts of the Docker Compose configuration, including:
+  - Anchors and aliases for common configurations
+  - Neo4j database service
+  - Root MCP server service
+  - Volume definitions
+
+- **custom_servers.yaml**: Defines additional MCP servers in a simplified format with sensible defaults:
+  ```yaml
+  custom_mcp_servers:
+    - id: server-id                    # Required: Used for service name (mcp-<id>)
+      container: CONTAINER_VAR_NAME    # Optional: Defaults to <ID>_CONTAINER_NAME
+      port: PORT_VAR_NAME              # Optional: Defaults to <ID>_PORT
+      dir: "entity_types/path"         # Optional: Defaults to entity_types/<id>
+      types: "Type1 Type2"             # Optional: Space-separated entity types
+      group_id: "custom-group-id"      # Optional: Defaults to <id>
+  ```
+
+- **generate_compose.py**: Python script that combines `base-compose.yaml` and `custom_servers.yaml` to generate the final `docker-compose.yml` file.
+
+## Default Values System
+
+The configuration system uses sensible defaults to minimize repetitive configuration:
+
+1. **Container Names**: By default, uses environment variables named `<ID>_CONTAINER_NAME` (e.g., `CIV7_CONTAINER_NAME`)
+
+2. **Ports**: 
+   - By default, uses environment variables named `<ID>_PORT` (e.g., `CIV7_PORT`)
+   - Default port values are assigned sequentially starting at 8001 (8001, 8002, etc.)
+   - Port values in the Docker Compose file use the format `${<ID>_PORT:-<default>}` to use the default if the environment variable is not set
+
+3. **Entity Type Directories**: By default, uses `entity_types/<id>` (e.g., `entity_types/civ7`)
+
+4. **Group IDs**: By default, uses the server `id` as the group ID
+
+## Usage
+
+1. Configure your MCP servers in `custom_servers.yaml` using the simplified format with defaults
+2. Run the generation script:
+   ```
+   python3 generate_compose.py
+   ```
+3. The script will generate a `docker-compose.yml` file that can be used with Docker Compose:
+   ```
+   docker-compose up -d
+   ```
+
+## Adding a New MCP Server
+
+To add a new MCP server with minimal configuration:
+
+1. Add the server definition to `custom_servers.yaml`:
+   ```yaml
+   custom_mcp_servers:
+     # ... existing servers ...
+     - id: new-server  # That's it! All other values will use defaults
+   ```
+
+2. Optionally, add environment variables to your `.env` file to override default settings:
+   ```
+   NEW_SERVER_CONTAINER_NAME=graphiti-mcp-new-server
+   NEW_SERVER_PORT=8099  # Override the default port
+   ```
+
+3. Run the generation script and restart your Docker Compose services:
+   ```
+   python3 generate_compose.py
+   docker-compose up -d
+   ```
+
+## Overriding Defaults
+
+If you need to override defaults for a specific service:
+
+```yaml
+- id: reporting
+  # Override default variable names
+  container: REPORTING_SVC_CONTAINER  # Use REPORTING_SVC_CONTAINER instead of REPORTING_CONTAINER_NAME
+  port: REPORTING_SVC_PORT            # Use REPORTING_SVC_PORT instead of REPORTING_PORT
+  
+  # Override default values
+  dir: "entity_types/custom_path"     # Use custom_path instead of reporting
+  group_id: "reports-group"           # Use reports-group instead of reporting
+  types: "Report Metric Dashboard"    # Specify entity types
+```
+
+## Customizing the Base Configuration
+
+If you need to modify the base configuration (Neo4j settings, root MCP server, etc.), edit `base-compose.yaml` directly. The changes will be incorporated the next time you run the generation script.
+
+## Notes
+
+- The script requires PyYAML to be installed (`pip install pyyaml`)
+- All services inherit common configuration from the anchors defined in `base-compose.yaml`
+- Custom MCP servers depend on both Neo4j and the root MCP server

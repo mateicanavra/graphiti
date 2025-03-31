@@ -22,6 +22,7 @@ usage() {
   echo -e "  ${CYAN}up${NC} [-d] [--log-level LEVEL]    Start all containers using docker compose. Use -d for detached mode."
   echo -e "  ${CYAN}down${NC} [--log-level LEVEL]       Stop and remove all containers using docker compose."
   echo -e "  ${CYAN}restart${NC} [--log-level LEVEL]    Restart all containers: runs 'down' followed by 'up'."
+  echo -e "  ${CYAN}compose${NC}                        Generate docker-compose.yml file from base-compose.yaml and custom_servers.yaml."
   echo
   echo -e "${BOLD}Arguments for init & rules:${NC}"
   echo -e "  ${BOLD}PROJECT_NAME${NC}  Name of the target project (used for schema filename)."
@@ -136,6 +137,42 @@ _setup_rules() {
   fi
 
   echo -e "${GREEN}Graphiti Cursor rules setup complete for project '$PROJECT_NAME'.${NC}"
+}
+
+# --- Helper Function for Ensuring docker-compose.yml is Generated ---
+_ensure_docker_compose_file() {
+  local MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
+  local DOCKER_COMPOSE_FILE="$MCP_SERVER_DIR/docker-compose.yml"
+  
+  echo -e "${BOLD}Ensuring docker-compose.yml is up-to-date...${NC}"
+  
+  # Check if we need to regenerate the file
+  # Always regenerate for safety, but could add timestamp checks later if needed
+  local CURRENT_DIR=$(pwd)
+  
+  # Change to mcp_server directory
+  cd "$MCP_SERVER_DIR"
+  
+  # Run the generation script
+  echo -e "Generating docker-compose.yml from templates..."
+  python generate_compose.py > /dev/null 2>&1
+  local RESULT=$?
+  
+  if [ $RESULT -ne 0 ]; then
+    echo -e "${RED}Warning: Failed to generate docker-compose.yml file.${NC}"
+    echo -e "${YELLOW}Continuing with existing file if it exists.${NC}"
+  fi
+  
+  # Return to the original directory
+  cd "$CURRENT_DIR"
+  
+  # Check if the file exists now
+  if [ ! -f "$DOCKER_COMPOSE_FILE" ]; then
+    echo -e "${RED}Error: docker-compose.yml file does not exist and could not be generated.${NC}"
+    return 1
+  fi
+  
+  return 0
 }
 
 # Function to find the repository path based on script location
@@ -417,6 +454,9 @@ elif [[ "$COMMAND" == "up" ]]; then
     export GRAPHITI_LOG_LEVEL="$LOG_LEVEL_OVERRIDE"
   fi
   
+  # Ensure docker-compose.yml is generated before continuing
+  _ensure_docker_compose_file || exit 1
+  
   # Ensure dist directory is ready for build
   ensure_dist_for_build || exit 1
   
@@ -540,6 +580,9 @@ elif [[ "$COMMAND" == "restart" ]]; then
   echo -e "${CYAN}Stopping containers...${NC}"
   docker compose down
   
+  # Ensure docker-compose.yml is generated before continuing
+  _ensure_docker_compose_file || exit 1
+  
   # Ensure dist directory is ready for build
   ensure_dist_for_build || exit 1
   
@@ -649,6 +692,40 @@ elif [[ "$COMMAND" == "link" ]]; then
   # Call the helper function
   _link_dev_files "$TARGET_DIR"
   exit 0
+
+elif [[ "$COMMAND" == "compose" ]]; then
+  # We need to run generate_compose.py from the mcp_server directory
+  MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
+  
+  if [ ! -d "$MCP_SERVER_DIR" ]; then
+    echo -e "${RED}Error: mcp_server directory not found at $MCP_SERVER_DIR${NC}"
+    exit 1
+  fi
+
+  # Save current directory to return to it afterwards
+  CURRENT_DIR=$(pwd)
+  
+  echo -e "${BOLD}Generating docker-compose.yml from templates...${NC}"
+  echo -e "Running from: ${CYAN}$MCP_SERVER_DIR${NC}"
+  
+  # Change to mcp_server directory where the script is located
+  cd "$MCP_SERVER_DIR"
+  
+  # Run the generation script
+  python generate_compose.py
+  RESULT=$?
+  
+  # Check the result and provide appropriate feedback
+  if [ $RESULT -eq 0 ]; then
+    echo -e "${GREEN}Successfully generated docker-compose.yml file.${NC}"
+  else
+    echo -e "${RED}Error: Failed to generate docker-compose.yml file.${NC}"
+  fi
+  
+  # Return to original directory
+  cd "$CURRENT_DIR"
+  
+  exit $RESULT
 
 else
   echo "Error: Unknown command '$COMMAND'"

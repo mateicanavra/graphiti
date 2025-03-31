@@ -11,4 +11,5 @@ dependencies = [
     # "graphiti-core @ file:///dist/graphiti_core-0.8.5-py3-none-any.whl",
     # For production/normal use (uncomment this and comment out the above):
     "graphiti-core>=0.8.5",
+    "ruamel.yaml>=0.17.21",
 ]
