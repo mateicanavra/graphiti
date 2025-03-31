@@ -23,7 +23,12 @@
     "customPatterns": [
       ".venv/**",
       "uv.lock",
-      "dist/**"
+      "dist/**",
+      ".ai/.archive/**",
+      "llm_cache/**",
+      "scripts/README.md",
+      "README.md",
+      "docs/**"
     ]
   },
   "security": {

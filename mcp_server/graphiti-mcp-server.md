@@ -27,7 +27,7 @@ The content is organized as follows:
 ## Notes
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Files matching these patterns are excluded: .venv/**, uv.lock, dist/**
+- Files matching these patterns are excluded: .venv/**, uv.lock, dist/**, .ai/.archive/**, llm_cache/**, scripts/README.md, README.md, docs/**
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
@@ -38,9 +38,7 @@ The content is organized as follows:
 ```
 .ai/
   plans/
-    improve-directory-structure-plan.md
-docs/
-  MCP_TOOLS_USAGE.md
+    refactor-architecture-plan.md
 entity_types/
   base/
     preferences.py
@@ -73,265 +71,391 @@ rules/
   graphiti-mcp-core-rules.md
 scripts/
   graphiti
-  README.md
 .env.example
 .python-version
 .repomixignore
+base-compose.yaml
+custom_servers.yaml
+docker-compose.template.yml
 docker-compose.yml
 Dockerfile
+entrypoint.sh
+generate_compose.py
 graphiti_mcp_server.py
 mcp_config_sse_example.json
 mcp_config_stdio_example.json
 pyproject.toml
-README.md
 repomix.config.json
 ```
 
 # Files
 
-## File: .ai/plans/improve-directory-structure-plan.md
+## File: .ai/plans/refactor-architecture-plan.md
 ````markdown
-**Objective:** Refactor the `mcp_server` entity type management for improved modularity, auto-discovery, and reusability across projects. Also, establish a robust system for guiding AI agents via Cursor rules.
+Okay, here is the detailed, step-by-step implementation plan based on the "Central Generation with Project YAML Config (No Project `.env`)" architecture. This plan is designed for an expert implementation agent.
 
-**Status: Phase 1 Complete, Phase 1 Cleanup Complete, Phase 2 Complete, Phase 2b Complete, Phase 2c Complete**
+**Overall Goal:** Refactor the system to allow project repositories to define their custom MCP servers via a local YAML file, managed and run centrally from the `mcp-server` repository, ensuring only one `neo4j` and `graphiti-mcp-root` instance.
 
-**1. Directory Structure & Registry Logic Implementation:**
+**Target Architecture Summary:** Central `mcp-server` repo runs `docker compose` using a generated `docker-compose.yml`. The generator reads a central `mcp-projects.yaml` registry (auto-managed by `graphiti init`) to find project-specific `mcp-config.yaml` files. These project configs define custom services, non-secret settings, and relative entity paths. The generator creates the final compose file, injecting project environment settings and volume mounts for project entities. `graphiti_mcp_server.py` loads both base and project-specific entities.
 
-*   **Goal:** Establish a clear separation between entity type definitions and the registry mechanism.
-*   **Implementation:**
-    *   The core registry logic (state and functions: `register_entity_type`, `get_entity_types`, `get_entity_type_subset`) resides in `mcp_server/entity_registry.py`.
-    *   `mcp_server/entity_types/` serves as the main package directory for entity type *definitions*.
-    *   `mcp_server/entity_types/__init__.py` makes the `entity_types` directory a Python package and re-exports the registry functions from `entity_registry.py`, allowing imports like `from mcp_server.entity_types import get_entity_types`.
-    *   Specific sets of entity type definitions are organized into subdirectories, e.g., `mcp_server/entity_types/base/` and `mcp_server/entity_types/example/`.
-    *   The auto-loader function (`load_entity_types_from_directory` in `graphiti_mcp_server.py`) dynamically imports `.py` files from specified directories (e.g., `entity_types/base` by default, or paths provided via `--entity-type-dir`), inspects them for valid Pydantic models with docstrings, and registers them using `register_entity_type` (which resolves to the function in `entity_registry.py`).
-*   **Outcome:** The structure aligns with the initial plan, achieving the desired separation of concerns.
+---
 
-**2. Phase 1 Cleanup: COMPLETED ✓**
+**Phase 1: Foundational Changes (Central Repo: `mcp-server`)**
 
-The following refinements have been implemented for enhanced clarity and adherence to the principle of least redundancy:
+**Step 1.1: Create Project Registry File**
 
-*   **Redundant Sub-Package Initializers:** Verified that `mcp_server/entity_types/base/__init__.py` and `mcp_server/entity_types/example/__init__.py` do not exist in the codebase, so no action was needed.
-*   **Redundant Explicit Imports:** Successfully removed the following line from `mcp_server/graphiti_mcp_server.py`:
-    ```python
-    from mcp_server.entity_types.base import requirements, preferences, procedures
+*   **Objective:** Establish the central registry file.
+*   **File:** `mcp-server/mcp-projects.yaml`
+*   **Action:** Create this new file with the following initial content:
+    ```yaml
+    # !! WARNING: This file is managed by the 'graphiti init' command. !!
+    # !! Avoid manual edits unless absolutely necessary.                 !!
+    #
+    # Maps project names to their configuration details.
+    # Paths should be absolute for reliability.
+    projects: {}
+    # Example Entry (will be added by 'graphiti init'):
+    # alpha:
+    #   config_file: /abs/path/to/project-alpha/mcp-config.yaml
+    #   root_dir: /abs/path/to/project-alpha
+    #   enabled: true
     ```
-    This import was not functionally required for runtime registration because the auto-loader handles the discovery and registration of these types from the `entity_types/base` directory. Removing it reinforces reliance on the dynamic loading mechanism and simplifies the top-level namespace.
+*   **Acceptance Criteria:** The file `mcp-server/mcp-projects.yaml` exists with the specified structure and comments.
 
-**3. Phase 2 - `graphiti` Dev Symlinking Script: COMPLETED ✓**
+**Step 1.2: Enhance Generator (`generate_compose.py`) - Load Registry & Modify Loop**
 
-*   **Objective:** Create a globally executable shell script (`graphiti`) to facilitate the reuse of entity type definitions and the Docker Compose configuration in other projects by creating symlinks for **development purposes**.
-*   **Implementation:**
-    *   **Script Creation:** Created the `graphiti` shell script in `mcp_server/scripts/` directory.
-    *   **Command:** Implemented the `link-dev-files [DIR]` command (and made it the default if no command is given).
-    *   **Environment Variable:** The script uses the `MCP_GRAPHITI_REPO_PATH` environment variable.
-    *   **Target Directory:** Accepts an optional target directory, defaulting to the current directory.
-    *   **Symlink Creation:** Creates symbolic links for `entity_types` and `docker-compose.yml`.
-    *   **Error Handling & Docs:** Added checks and documentation.
-    *   **Testing:** Tested successfully.
-*   **Outcome:** The `link-dev-files` command works as expected for setting up development environments.
+*   **Objective:** Update the generator to read the new registry instead of `custom_servers.yaml`.
+*   **File:** `mcp-server/generate_compose.py`
+*   **Actions:**
+    1.  Import `os` at the top.
+    2.  Define `MCP_PROJECTS_FILE = 'mcp-projects.yaml'` near other constants (@LINE:13).
+    3.  Remove the constant `CUSTOM_SERVERS_CONFIG_FILE = 'custom_servers.yaml'` (@LINE:12).
+    4.  **Replace** the "Load Custom Server Configurations" block (approx. @LINE:42-@LINE:64):
+        *   Load `MCP_PROJECTS_FILE` using `yaml.load()` (consider `YAML(typ='safe')` for this registry file).
+        *   Handle `FileNotFoundError` (log warning, set `projects_registry = {'projects': {}}`).
+        *   Handle parsing errors (log warning/error, exit or proceed cautiously).
+    5.  **Replace** the outer loop structure in "Generate and Add Custom Service Definitions" (approx. @LINE:81):
+        *   Remove the old loop `for n, server_conf in enumerate(custom_mcp_servers):`.
+        *   Initialize an overall service index `overall_service_index = 0`.
+        *   Start a new loop: `for project_name, project_data in projects_registry.get('projects', {}).items():`.
+        *   Inside this loop, check `if not project_data.get('enabled', False): continue`.
+        *   Load the project's config file: `project_config_path = project_data.get('config_file')`. Add error handling (file not found, parse error - log warning and skip project). Use `yaml.load()` (safe load).
+        *   Start an inner loop: `for server_conf in project_config.get('services', []):`.
+        *   Inside the inner loop, retrieve `server_id = server_conf.get('id')`. Add validation (skip service if no id).
+        *   Increment `overall_service_index` at the end of the inner loop.
+*   **Acceptance Criteria:**
+    *   `generate_compose.py` attempts to load `mcp-projects.yaml`.
+    *   The script iterates through enabled projects found in the registry.
+    *   For each enabled project, it attempts to load the specified project configuration file.
+    *   It then iterates through the `services` defined within that project configuration.
+    *   The old `custom_servers.yaml` logic is removed.
 
-**4. Phase 2b - `graphiti` Cursor Rules Setup & AI Guidance Framework: COMPLETED ✓**
+**Step 1.3: Enhance Generator (`generate_compose.py`) - Resolve Paths & Add Volumes**
 
-*   **Objective:** Define a structured system for guiding AI agents using Cursor rules and enhance the `graphiti` script to automate the setup of these rules in target projects.
-*   **Implementation:**
-    *   **Rule Definition:** Designed a three-tier rule system:
-        *   `graphiti-mcp-core-rules.md`: General tool usage and principles.
-        *   `graphiti-knowledge-graph-maintenance.md`: Process for updating project schemas.
-        *   `graphiti-[project-name]-schema.mdc`: Project-specific entities, relationships, and rules (template generated).
-    *   **Rule Content:** Created and refined the content for the core and maintenance rules, including background/references. Created an example project schema (`graphiti-example-schema.md`).
-    *   **File Organization:** Moved rules (`.md`) and the schema template (`.md`) into a structured `mcp_server/rules/` directory (with `templates/` and `examples/` subdirs).
-    *   **`graphiti` Script Enhancement:** Added the `setup-rules PROJECT_NAME [DIR]` command to:
-        *   Create `.cursor/rules/graphiti` in the target directory.
-        *   Symlink the core and maintenance `.md` rules as `.mdc` files.
-        *   Generate the project-specific schema `.mdc` file from the `.md` template, substituting the project name.
-    *   **Testing:** Manual verification of file structure and script logic.
-*   **Outcome:** A well-defined AI guidance system is in place, and the `graphiti setup-rules` command automates its deployment into user projects.
+*   **Objective:** Calculate absolute entity paths and add volume mounts to service definitions.
+*   **File:** `mcp-server/generate_compose.py`
+*   **Actions:**
+    1.  Define `CONTAINER_ENTITY_PATH = "/app/project_entities"` near constants (@LINE:13).
+    2.  Inside the *inner* service loop (after getting `server_conf`):
+        *   Get `relative_entity_dir = server_conf.get('entity_dir')`. Add validation (log warning/skip service if missing).
+        *   Get `project_root_dir = project_data.get('root_dir')`. Add validation (log warning/skip project if missing).
+        *   Calculate `abs_host_entity_path = os.path.abspath(os.path.join(project_root_dir, relative_entity_dir))`.
+        *   Ensure the `new_service` map (created via `CommentedMap()`) has a `volumes` key initialized as an empty list if it doesn't exist.
+        *   Append the volume string: `new_service.setdefault('volumes', []).append(f"{abs_host_entity_path}:{CONTAINER_ENTITY_PATH}:ro")`. (Using `:ro` for read-only mount is safer).
+*   **Acceptance Criteria:**
+    *   The generator calculates the absolute path on the host for the project's entity directory.
+    *   A `volumes` section is added/appended to each generated custom service definition, mapping the host path to `/app/project_entities` (read-only).
 
-**4c. Phase 2c - `graphiti` Script Testing & Bug Fixes: COMPLETED ✓**
+**Step 1.4: Enhance Generator (`generate_compose.py`) - Update Environment Variables**
 
-*   **Objective:** Test the new `graphiti init` command and ensure it correctly performs both file linking and rule setup functions.
-*   **Implementation:**
-    *   **Issue Identification:** During testing, discovered that the helper functions (`_link_dev_files` and `_setup_rules`) were defined after they were called in the script, causing a "command not found" error.
-    *   **Bug Fix:** Moved the function definitions to earlier in the script, before the command parsing logic, following the principle that in Bash functions must be defined before they're called.
-    *   **Testing Methodology:** 
-        *   Created a test directory on the desktop (`~/Desktop/graphiti_test`)
-        *   Set the required environment variable (`MCP_GRAPHITI_REPO_PATH`)
-        *   Ran the `graphiti init test-project .` command
-        *   Verified correct creation of symlinks and rule files
-        *   Validated proper substitution of project name in schema template
-    *   **Cleanup:** Removed test directory after successful validation
-*   **Outcome:** The `graphiti init` command now works correctly, properly orchestrating both the `link-dev-files` and `setup-rules` functionality in a single command for streamlined project setup.
+*   **Objective:** Set `MCP_ENTITY_TYPE_DIR` correctly and merge project-specific environment variables.
+*   **File:** `mcp-server/generate_compose.py`
+*   **Actions:**
+    1.  Inside the inner service loop, locate the `env_vars = CommentedMap()` creation (@LINE:110).
+    2.  Modify the setting of `MCP_ENTITY_TYPE_DIR` (@LINE:115): Set it directly to the container path: `env_vars['MCP_ENTITY_TYPE_DIR'] = CONTAINER_ENTITY_PATH`.
+    3.  Remove the `if entity_types is not None:` block (@LINE:117-@LINE:121) if the `types` key in project config is no longer supported (confirm this - current `custom_servers.yaml` uses it @LINE:17). *If `types` is still needed*, ensure `MCP_ENTITY_TYPES` is added correctly to `env_vars`. **Plan Decision:** Let's assume `types` is deprecated for V1 simplicity; remove the block.
+    4.  Get the project environment dictionary: `project_environment = server_conf.get('environment', {})`.
+    5.  Merge `project_environment` into `env_vars`: `env_vars.update(project_environment)`. This ensures project-specific vars are added. *Note: `ruamel.yaml`'s `CommentedMap` update preserves order and comments if possible.*
+*   **Acceptance Criteria:**
+    *   The `MCP_ENTITY_TYPE_DIR` environment variable in generated services is set to `/app/project_entities`.
+    *   Any key-value pairs defined under the `environment:` key in the project's `mcp-config.yaml` are added to the service's environment definition.
+    *   The logic for the `types` key (and `MCP_ENTITY_TYPES` env var) is removed (or confirmed working if kept).
 
-**5. Plan for Testing Auto-Loading via Docker Compose (Phase 3 - NEXT):**
+**Step 1.5: Enhance Generator (`generate_compose.py`) - Update Port/Container Name Logic**
 
-*   **Objective:** Verify that the `--entity-type-dir` argument correctly limits the auto-loading scope when running services via Docker Compose.
-*   **Prerequisites:** Phase 1 Cleanup complete.
-*   **Implementation Steps:**
-    *   Modify the `command` section of services in `mcp_server/docker-compose.yml`.
-    *   **Test Case 1 (Base Only):** For one service (e.g., `graphiti-magic-api`), ensure the command includes `--use-custom-entities` but *only* specifies the base directory: `"--entity-type-dir", "mcp_server/entity_types/base"`.
-    *   **Test Case 2 (Example Only):** For another service (e.g., `graphiti-civ7`), modify the command to load *only* the example types: `"--entity-type-dir", "mcp_server/entity_types/example"`.
-    *   **Test Case 3 (Specific Subset via CLI - Optional):** Explore using the `--entity-types` argument.
-    *   **Execution:** Run `docker compose down && docker compose up --build --force-recreate`.
-    *   **Verification:** Examine service logs (`docker compose logs <service_name>`) to confirm correct entity types are loaded per service based on the `--entity-type-dir` argument.
+*   **Objective:** Source ports and container names directly from project config or generator defaults.
+*   **File:** `mcp-server/generate_compose.py`
+*   **Actions:**
+    1.  Inside the inner service loop, **remove** the lines defining `container_name_var` (@LINE:95) and `port_var` (@LINE:96).
+    2.  **Replace** the `port_mapping` definition (@LINE:101):
+        *   Get `port_default = server_conf.get('port_default')`.
+        *   If `port_default is None`: `port_default = DEFAULT_PORT_START + overall_service_index + 1` (Use the index tracking overall services across all projects).
+        *   Define `port_mapping = f"{port_default}:${{{DEFAULT_MCP_CONTAINER_PORT_VAR}}}"`.
+        *   Ensure `new_service['ports'] = [port_mapping]` (@LINE:109) uses this new `port_mapping`.
+    3.  **Replace** the `container_name` definition (@LINE:108):
+        *   Get `container_name = server_conf.get('container_name')`.
+        *   If `container_name is None`: `container_name = f"mcp-{server_id}"`.
+        *   Set `new_service['container_name'] = container_name`.
+*   **Acceptance Criteria:**
+    *   The generator no longer looks for `*_PORT` or `*_CONTAINER_NAME` environment variables for custom services.
+    *   Ports are assigned based on `port_default` in project config, or sequentially otherwise.
+    *   Container names are assigned based on `container_name` in project config, or derived from the service `id` otherwise.
 
-**Next Steps:**
+**Step 1.6: Enhance Generator (`generate_compose.py`) - Ensure Base Merge**
 
-1.  **Testing `graphiti setup-rules`:** Perform a functional test of the new `graphiti setup-rules` command in a clean temporary directory to ensure it creates the correct structure, links, and files. **COMPLETED ✓**
-2.  **Implement Phase 3:** Modify `docker-compose.yml` and perform auto-loading testing as outlined above.
-````
+*   **Objective:** Verify that shared configurations are still inherited correctly.
+*   **File:** `mcp-server/generate_compose.py`
+*   **Actions:**
+    1.  Confirm the line `new_service.add_yaml_merge([(0, custom_base_anchor_obj)])` (@LINE:126) is still present within the inner service loop and functions as expected.
+*   **Acceptance Criteria:** Generated custom services in `docker-compose.yml` contain `<<: *graphiti-mcp-custom-base`.
 
-## File: docs/MCP_TOOLS_USAGE.md
-````markdown
-# Graphiti MCP Tools Usage Guide
+**Step 1.7: Adapt Server Script (`graphiti_mcp_server.py`) - Entity Loading**
 
-This document provides guidance on using the Graphiti Model Context Protocol (MCP) tools, including known issues, parameter handling, and best practices.
+*   **Objective:** Enable loading of both base and project-specific entity types.
+*   **File:** `mcp-server/graphiti_mcp_server.py`
+*   **Actions:**
+    1.  Inside the `initialize_server` function (after `args = parser.parse_args()` approx. @LINE:761):
+    2.  Define the expected path for base types within the container: `container_base_entity_dir = "/app/entity_types/base"` (Ensure this matches Dockerfile copy destination).
+    3.  Add logic to *always* load base types first:
+        ```python
+        if os.path.exists(container_base_entity_dir) and os.path.isdir(container_base_entity_dir):
+            logger.info(f'Loading base entity types from: {container_base_entity_dir}')
+            load_entity_types_from_directory(container_base_entity_dir)
+        else:
+            logger.warning(f"Base entity types directory not found at: {container_base_entity_dir}")
+        ```
+    4.  Add logic to load project-specific types if the directory is provided and different:
+        ```python
+        project_entity_dir = args.entity_type_dir # From --entity-type-dir arg
+        if project_entity_dir:
+             # Resolve paths to handle potential symlinks or relative paths inside container if needed
+             abs_project_dir = os.path.abspath(project_entity_dir)
+             abs_base_dir = os.path.abspath(container_base_entity_dir)
+             if abs_project_dir != abs_base_dir:
+                  if os.path.exists(abs_project_dir) and os.path.isdir(abs_project_dir):
+                      logger.info(f'Loading project-specific entity types from: {abs_project_dir}')
+                      load_entity_types_from_directory(abs_project_dir)
+                  else:
+                      logger.warning(f"Project entity types directory not found or not a directory: {abs_project_dir}")
+             else:
+                  logger.info(f"Project entity directory '{project_entity_dir}' is the same as base, skipping redundant load.")
+        ```
+    5.  Ensure `load_entity_types_from_directory` (@LINE:811) handles being called multiple times correctly (the current implementation using a global registry `@LINE:28` should be fine).
+*   **Acceptance Criteria:**
+    *   The server logs attempts to load base entities.
+    *   If a custom service container has a volume mounted at `/app/project_entities` and `MCP_ENTITY_TYPE_DIR` set to that path, the server logs attempts to load entities from that directory as well.
+    *   The final list of registered entities includes both base and project-specific types.
 
-## Table of Contents
+**Step 1.8: Verify Dockerfile**
 
-- [Available MCP Tools](#available-mcp-tools)
-- [Known Issues and Solutions](#known-issues-and-solutions)
-- [Best Practices](#best-practices)
-- [Usage Examples](#usage-examples)
+*   **Objective:** Confirm base entities are copied into the image.
+*   **File:** `Dockerfile` (provided in clipboard)
+*   **Actions:**
+    1.  Verify the line `COPY entity_types/ ./entity_types/` (@LINE:21) is present and correctly copies `mcp-server/entity_types/base` into `/app/entity_types/base` within the image.
+*   **Acceptance Criteria:** The Docker build process includes the base entity type definitions.
 
-## Available MCP Tools
+---
 
-The Graphiti MCP server exposes the following tools:
+**Phase 2: CLI and Project Workflow**
 
-| Tool | Description | Key Parameters |
-|------|-------------|----------------|
-| `mcp_graphiti_core_add_episode` | Add an episode to the knowledge graph | `name`, `episode_body`, `source` |
-| `mcp_graphiti_core_search_nodes` | Search for node summaries | `query`, `max_nodes`, `center_node_uuid` |
-| `mcp_graphiti_core_search_facts` | Search for facts (edges) | `query`, `max_facts`, `center_node_uuid` |
-| `mcp_graphiti_core_delete_entity_edge` | Delete an entity edge | `uuid` |
-| `mcp_graphiti_core_delete_episode` | Delete an episode | `uuid` |
-| `mcp_graphiti_core_get_entity_edge` | Get an entity edge details | `uuid` |
-| `mcp_graphiti_core_get_episodes` | Get recent episodes | `last_n` |
-| `mcp_graphiti_core_clear_graph` | Clear all graph data | `random_string` (dummy parameter) |
+**Step 2.1: Create YAML Helper Script (Optional but Recommended)**
 
-## Known Issues and Solutions
+*   **Objective:** Provide a robust way for the bash `graphiti` script to modify `mcp-projects.yaml`.
+*   **File:** `mcp-server/scripts/_yaml_helper.py` (New File)
+*   **Actions:**
+    1.  Create the Python script.
+    2.  Use `argparse` to handle command-line arguments (e.g., `update-registry`, `--registry-file`, `--project-name`, `--root-dir`, `--config-file`).
+    3.  Use `ruamel.yaml` (specifically `YAML()` for round-trip loading/dumping) to:
+        *   Load the specified registry file.
+        *   Navigate to `data['projects']`.
+        *   Add or update the entry for the given project name with the provided absolute paths (`root_dir`, `config_file`) and set `enabled: true`.
+        *   Write the modified data back to the registry file, preserving comments and formatting.
+    4.  Include error handling (file not found, parsing errors, key errors).
+*   **Acceptance Criteria:** A Python script exists that can reliably add/update project entries in `mcp-projects.yaml` via command-line arguments.
 
-### 1. `group_id` Parameter Handling
+**Step 2.2: Enhance CLI (`scripts/graphiti`) - `init` Command**
 
-**Issue**: When using the `mcp_graphiti_core_add_episode` tool, explicitly providing a `group_id` parameter as a string causes an error: `Parameter 'group_id' must be of type undefined, got string`.
+*   **Objective:** Automate project setup and registration in `mcp-projects.yaml`.
+*   **File:** `mcp-server/scripts/graphiti`
+*   **Actions:**
+    1.  Locate the `init` command block (@LINE:377).
+    2.  **Remove** the call to `_link_dev_files "$TARGET_DIR"` (@LINE:387).
+    3.  Add commands to create a template `mcp-config.yaml` in `$TARGET_DIR`. Example content:
+        ```bash
+        cat > "$TARGET_DIR/mcp-config.yaml" << EOF
+        # Configuration for project: $PROJECT_NAME
+        services:
+          - id: ${PROJECT_NAME}-main # Service ID (used for default naming)
+            # container_name: "custom-name" # Optional: Specify custom container name
+            # port_default: 8001           # Optional: Specify custom host port
+            group_id: "$PROJECT_NAME"     # Graph group ID
+            entity_dir: "entities"       # Relative path to entity definitions within project
+            # environment:                 # Optional: Add non-secret env vars here
+            #   MY_FLAG: "true"
+        EOF
+        echo -e "Created template ${CYAN}$TARGET_DIR/mcp-config.yaml${NC}"
+        ```
+    4.  Add command to create the entity directory: `mkdir -p "$TARGET_DIR/entities"` and add a placeholder `.gitkeep` or example file.
+    5.  Implement the registry update:
+        *   Get absolute path of target dir: `ABS_TARGET_DIR=$(cd "$TARGET_DIR" && pwd)`
+        *   Define absolute config path: `ABS_CONFIG_PATH="$ABS_TARGET_DIR/mcp-config.yaml"`
+        *   Define central registry path: `CENTRAL_REGISTRY_PATH="$SOURCE_SERVER_DIR/mcp-projects.yaml"`
+        *   Call the helper script (assuming Option A from thought process):
+            ```bash
+            echo -e "Updating central project registry: ${CYAN}$CENTRAL_REGISTRY_PATH${NC}"
+            python "$SOURCE_SERVER_DIR/scripts/_yaml_helper.py" update-registry \
+              --registry-file "$CENTRAL_REGISTRY_PATH" \
+              --project-name "$PROJECT_NAME" \
+              --root-dir "$ABS_TARGET_DIR" \
+              --config-file "$ABS_CONFIG_PATH"
+            # Add error checking based on python script exit code
+            if [ $? -ne 0 ]; then
+              echo -e "${RED}Error: Failed to update project registry.${NC}"
+              # Decide whether to exit or just warn
+              exit 1
+            fi
+            ```
+*   **Acceptance Criteria:**
+    *   `graphiti init <name> <dir>` creates `mcp-config.yaml` and `entities/` dir in `<dir>`.
+    *   It correctly calls the YAML helper script (or other method) to add/update the project entry in `mcp-projects.yaml` with absolute paths.
+    *   The obsolete linking step is removed.
 
-**Solution**: Omit the `group_id` parameter completely when calling the tool. The system will use a default group_id from the command line configuration or generate one.
+**Step 2.3: Enhance CLI (`scripts/graphiti`) - Update Compose/Run Commands**
 
-```python
-# Incorrect usage
-mcp_graphiti_core_add_episode(
-    name="Episode Name",
-    episode_body="Content...",
-    group_id="graphiti-source"  # This causes an error
-)
+*   **Objective:** Ensure Docker Compose commands use the centrally generated file correctly.
+*   **File:** `mcp-server/scripts/graphiti`
+*   **Actions:**
+    1.  Verify the `compose` command (@LINE:590) simply runs `python generate_compose.py` within the `$MCP_SERVER_DIR` context.
+    2.  Verify the `up`, `down`, `restart` commands (@LINE:400, @LINE:471, @LINE:536) correctly `cd` to `$MCP_SERVER_DIR`, call `_ensure_docker_compose_file` (which runs the generator), and then execute `docker compose ...`.
+*   **Acceptance Criteria:** The `compose`, `up`, `down`, `restart` commands function correctly with the new generator logic, operating within the central `mcp-server` directory.
 
-# Correct usage
-mcp_graphiti_core_add_episode(
-    name="Episode Name",
-    episode_body="Content..."
-    # Let the system use the default group_id
-)
-```
+**Step 2.4: Enhance CLI (`scripts/graphiti`) - Remove `link` Command**
 
-**Background**: While the API documentation suggests that `group_id` is an optional string parameter, the MCP tool implementation expects this parameter to be either undefined or null, not an explicit string. This behavior may be specific to the MCP tool implementation rather than the underlying Graphiti API itself.
+*   **Objective:** Remove the obsolete symlinking functionality.
+*   **File:** `mcp-server/scripts/graphiti`
+*   **Actions:**
+    1.  Delete the `_link_dev_files` function (approx. @LINE:58-@LINE:74).
+    2.  Delete the `elif [[ "$COMMAND" == "link" ]];` block (approx. @LINE:579-@LINE:584).
+    3.  Remove `"link"` from the command list in the `usage` function (@LINE:13).
+    4.  Remove the "Arguments for link" section from the `usage` function (@LINE:25-@LINE:27).
+    5.  Update the default command logic (@LINE:371): Change `COMMAND="${1:-link}"` to something sensible, perhaps default to showing usage or remove the default entirely: `COMMAND="${1}"`. If removing the default, add a check: `if [ -z "$COMMAND" ]; then usage; fi`. Let's choose to default to usage if no command is given.
+        *   Change `@LINE:371` to `COMMAND="${1}"`.
+        *   Add after `@LINE:372`:
+            ```bash
+            if [ -z "$COMMAND" ]; then
+              echo -e "${YELLOW}No command specified.${NC}"
+              usage
+            fi
+            ```
+*   **Acceptance Criteria:**
+    *   The `_link_dev_files` function is removed.
+    *   The `link` command logic block is removed.
+    *   The `usage` function no longer mentions the `link` command.
+    *   Running `graphiti` with no command now shows the usage help text.
 
-## Best Practices
+---
 
-### 1. Working with Knowledge Graph Search
+**Phase 3: Testing and Documentation**
 
-Graphiti's knowledge graph uses a sophisticated hybrid search approach that combines:
+**Step 3.1: Create Sample Projects**
 
-- **Vector Similarity Search**: For semantic understanding
-- **Full-text Search**: For keyword/text matching  
-- **Graph Traversal**: Finding related nodes via BFS (Breadth-First Search)
-- **Advanced Re-ranking**: Using techniques like MMR, Cross-encoder, RRF, etc.
+*   **Objective:** Set up test projects to validate the new workflow.
+*   **Actions:**
+    1.  Create two new directories outside `mcp-server`, e.g., `/workspace/test-project-1` and `/workspace/test-project-2`.
+    2.  In `test-project-1`:
+        *   Create a basic `entities/` directory with a simple Pydantic model `TestEntity1.py`.
+        *   Prepare a basic `mcp-config.yaml`:
+            ```yaml
+            # /workspace/test-project-1/mcp-config.yaml
+            services:
+              - id: test1-main
+                port_default: 8051 # Assign a unique, available port
+                container_name: "mcp-test1-service"
+                group_id: "test-project-1"
+                entity_dir: "entities"
+                environment:
+                  TEST_PROJECT_FLAG: "Project1"
+            ```
+    3.  In `test-project-2`:
+        *   Create `entities/` with `TestEntity2.py`.
+        *   Prepare `mcp-config.yaml`:
+            ```yaml
+            # /workspace/test-project-2/mcp-config.yaml
+            services:
+              - id: test2-aux
+                # Rely on generator defaults for port/name
+                group_id: "test-project-2"
+                entity_dir: "entities"
+                environment:
+                  TEST_PROJECT_FLAG: "Project2"
+                  ANOTHER_FLAG: "enabled"
+            ```
+*   **Acceptance Criteria:** Two distinct project directories exist, each containing a basic entity definition and an `mcp-config.yaml` file defining at least one service.
 
-When formulating search queries:
-- Use natural language for semantic searches
-- Include key terms for better results
-- Be specific when searching for exact facts
+**Step 3.2: Test `graphiti init`**
 
-### 2. Adding Episodes with Structured Data
+*   **Objective:** Verify project initialization and registry update.
+*   **Actions:**
+    1.  Navigate to `/workspace/test-project-1`.
+    2.  Run `../mcp-server/scripts/graphiti init test-project-1 .` (adjust path to `graphiti` as needed).
+    3.  Verify console output indicates success and registry update.
+    4.  Inspect `/workspace/mcp-server/mcp-projects.yaml`. Check if an entry for `test-project-1` exists with correct absolute paths and `enabled: true`.
+    5.  Verify `.cursor/rules/graphiti` structure is created in `test-project-1`.
+    6.  Repeat steps 1-5 for `test-project-2`.
+*   **Acceptance Criteria:** Both test projects are successfully registered in `mcp-projects.yaml` with correct absolute paths. Rules directories are created.
 
-When adding JSON data, ensure the JSON is properly escaped:
+**Step 3.3: Test `graphiti compose`**
 
-```python
-mcp_graphiti_core_add_episode(
-    name="Customer Profile",
-    episode_body="{\"company\": {\"name\": \"Acme Technologies\"}, \"products\": [{\"id\": \"P001\", \"name\": \"CloudSync\"}]}",
-    source="json",
-    source_description="CRM data"
-)
-```
+*   **Objective:** Verify correct generation of the combined `docker-compose.yml`.
+*   **Actions:**
+    1.  Navigate to `/workspace/mcp-server`.
+    2.  Run `scripts/graphiti compose`.
+    3.  Verify console output indicates success.
+    4.  Inspect the generated `docker-compose.yml`:
+        *   Check for services `neo4j`, `graphiti-mcp-root`, `mcp-test1-main`, `mcp-test2-aux`.
+        *   Verify `mcp-test1-main`:
+            *   Has `container_name: "mcp-test1-service"`.
+            *   Has `ports: ["8051:8000"]` (or correct mapping based on `MCP_ROOT_CONTAINER_PORT`).
+            *   Has correct `volumes` mount for `/workspace/test-project-1/entities` to `/app/project_entities`.
+            *   Has `environment` including `MCP_GROUP_ID: "test-project-1"`, `MCP_ENTITY_TYPE_DIR: "/app/project_entities"`, `TEST_PROJECT_FLAG: "Project1"`, and inherited base env vars.
+        *   Verify `mcp-test2-aux`:
+            *   Has default container name (e.g., `mcp-test2-aux`).
+            *   Has default sequential port (e.g., `8002:8000`).
+            *   Has correct `volumes` mount for `/workspace/test-project-2/entities`.
+            *   Has `environment` including `MCP_GROUP_ID: "test-project-2"`, `MCP_ENTITY_TYPE_DIR: "/app/project_entities"`, `TEST_PROJECT_FLAG: "Project2"`, `ANOTHER_FLAG: "enabled"`, and inherited base env vars.
+*   **Acceptance Criteria:** The generated `docker-compose.yml` accurately reflects the combination of `base-compose.yaml` and the configurations from both registered test projects.
 
-### 3. Context-Aware Searching
+**Step 3.4: Test `graphiti up`/`down`/`restart`**
 
-Use the `center_node_uuid` parameter when you want to prioritize search results that are closely related to a specific entity in the graph:
+*   **Objective:** Verify the full stack runs correctly.
+*   **Actions:**
+    1.  Navigate to `/workspace/mcp-server`.
+    2.  Run `scripts/graphiti up -d` (detached mode for easier testing).
+    3.  Check container status (`docker ps`). Verify all four containers (`neo4j`, `graphiti-mcp-root`, `mcp-test1-service`, `mcp-test2-aux`) are running.
+    4.  Check logs (`docker logs mcp-test1-service`, `docker logs mcp-test2-aux`). Verify:
+        *   Logs indicate loading of base entities.
+        *   Logs indicate loading of project-specific entities (`TestEntity1`, `TestEntity2`).
+        *   Correct `MCP_GROUP_ID` and other environment variables are logged/used.
+    5.  (Optional) Test basic functionality via `curl` or MCP client if available.
+    6.  Run `scripts/graphiti down`. Verify all containers are stopped and removed.
+    7.  Run `scripts/graphiti restart -d`. Verify containers stop and restart successfully.
+*   **Acceptance Criteria:** All defined services start correctly, load appropriate entities, use correct configurations, and can be managed via the `graphiti` CLI commands.
 
-```python
-mcp_graphiti_core_search_facts(
-    query="product features",
-    center_node_uuid="uuid-of-company-node"
-)
-```
+**Step 3.5: Update Documentation**
 
-## Usage Examples
-
-### Adding a Text Episode
-
-```python
-mcp_graphiti_core_add_episode(
-    name="Project Requirements",
-    episode_body="The system must support real-time updates and maintain historical data integrity.",
-    source="text",
-    source_description="requirements document"
-)
-```
-
-### Searching for Facts
-
-```python
-mcp_graphiti_core_search_facts(
-    query="What are the system requirements?",
-    max_facts=5
-)
-```
-
-### Adding Conversation Data
-
-```python
-mcp_graphiti_core_add_episode(
-    name="Client Meeting Discussion",
-    episode_body="user: What's your timeline for deployment?\nassistant: We're planning to deploy the first phase by Q2 2025.",
-    source="message",
-    source_description="client meeting transcript"
-)
-```
-
-### Retrieving Recent Episodes
-
-```python
-mcp_graphiti_core_get_episodes(
-    last_n=5
-)
-```
-
-## Search Mechanism Details
-
-Graphiti's knowledge graph leverages a sophisticated hybrid search approach that combines multiple search methods:
-
-1. **Vector Similarity Search**: The system creates embeddings for queries using an EmbedderClient. When a search is performed, the query text is converted to a vector representation with `query_vector = await embedder.create(input_data=[query])`. Functions like `node_similarity_search` and `edge_similarity_search` use this vector similarity to find semantically relevant content.
-
-2. **Full-text Search**: Traditional keyword/text matching is implemented through `node_fulltext_search` and `edge_fulltext_search` functions for finding literal text matches.
-
-3. **Graph Traversal**: BFS (Breadth-First Search) is used to find related nodes and edges with `node_bfs_search` and `edge_bfs_search`, leveraging the graph structure to discover connected information.
-
-4. **Advanced Re-ranking**: Multiple sophisticated re-ranking strategies are applied after initial search:
-   - MMR (Maximal Marginal Relevance) for diversity in results
-   - Cross-encoder neural re-ranking for improved relevance
-   - RRF (Reciprocal Rank Fusion) to combine multiple search methods
-   - Node distance and episode mentions re-ranking for contextual relevance
-
-The system executes these different search methods in parallel and then combines the results using the configured re-ranking strategy.
+*   **Objective:** Reflect the new architecture and workflow in documentation.
+*   **Files:** `README.md`, potentially other `.md` files. Remove/Update `docker-compose.template.yml`.
+*   **Actions:**
+    1.  Update `README.md`:
+        *   Describe the new architecture (central control, project configs, registry).
+        *   Explain the updated `graphiti init` workflow for setting up a project.
+        *   Explain the structure and purpose of `mcp-config.yaml`.
+        *   Explain the purpose of `mcp-projects.yaml` (and warn against manual editing).
+        *   Document the `graphiti compose`, `up`, `down`, `restart` commands, emphasizing they run from the central repo.
+        *   Remove references to the old `custom_servers.yaml` and symlinking (`link` command).
+    2.  Decide fate of `docker-compose.template.yml`: Either remove it entirely or update it drastically to only show the *base* services and explain that custom services are added via the generation process. Removing might be cleaner.
+    3.  Review rule files (`graphiti-mcp-core-rules.md`, etc.) for any outdated references to configuration or workflow.
+*   **Acceptance Criteria:** Documentation accurately reflects the V1 architecture and usage. Obsolete documentation is removed or updated.
 ````
 
 ## File: entity_types/base/preferences.py
@@ -1773,6 +1897,7 @@ usage() {
   echo -e "  ${CYAN}up${NC} [-d] [--log-level LEVEL]    Start all containers using docker compose. Use -d for detached mode."
   echo -e "  ${CYAN}down${NC} [--log-level LEVEL]       Stop and remove all containers using docker compose."
   echo -e "  ${CYAN}restart${NC} [--log-level LEVEL]    Restart all containers: runs 'down' followed by 'up'."
+  echo -e "  ${CYAN}compose${NC}                        Generate docker-compose.yml file from base-compose.yaml and custom_servers.yaml."
   echo
   echo -e "${BOLD}Arguments for init & rules:${NC}"
   echo -e "  ${BOLD}PROJECT_NAME${NC}  Name of the target project (used for schema filename)."
@@ -1887,6 +2012,42 @@ _setup_rules() {
   fi
 
   echo -e "${GREEN}Graphiti Cursor rules setup complete for project '$PROJECT_NAME'.${NC}"
+}
+
+# --- Helper Function for Ensuring docker-compose.yml is Generated ---
+_ensure_docker_compose_file() {
+  local MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
+  local DOCKER_COMPOSE_FILE="$MCP_SERVER_DIR/docker-compose.yml"
+  
+  echo -e "${BOLD}Ensuring docker-compose.yml is up-to-date...${NC}"
+  
+  # Check if we need to regenerate the file
+  # Always regenerate for safety, but could add timestamp checks later if needed
+  local CURRENT_DIR=$(pwd)
+  
+  # Change to mcp_server directory
+  cd "$MCP_SERVER_DIR"
+  
+  # Run the generation script
+  echo -e "Generating docker-compose.yml from templates..."
+  python generate_compose.py > /dev/null 2>&1
+  local RESULT=$?
+  
+  if [ $RESULT -ne 0 ]; then
+    echo -e "${RED}Warning: Failed to generate docker-compose.yml file.${NC}"
+    echo -e "${YELLOW}Continuing with existing file if it exists.${NC}"
+  fi
+  
+  # Return to the original directory
+  cd "$CURRENT_DIR"
+  
+  # Check if the file exists now
+  if [ ! -f "$DOCKER_COMPOSE_FILE" ]; then
+    echo -e "${RED}Error: docker-compose.yml file does not exist and could not be generated.${NC}"
+    return 1
+  fi
+  
+  return 0
 }
 
 # Function to find the repository path based on script location
@@ -2021,6 +2182,12 @@ validate_log_level() {
 }
 
 # Function to ensure dist directory is available for Docker build
+#
+# This function checks if the graphiti-core package is configured to use a local wheel
+# If so, it ensures the dist directory exists and copies the wheel files to the mcp_server/dist directory
+# This is used to ensure the graphiti-core package is built and available for use in the Docker containers
+#
+# If the graphiti-core package is configured to use the published package, this function will return 0 and no action will be taken
 ensure_dist_for_build() {
   echo -e "${BOLD}Checking build configuration...${NC}"
   
@@ -2162,6 +2329,9 @@ elif [[ "$COMMAND" == "up" ]]; then
     export GRAPHITI_LOG_LEVEL="$LOG_LEVEL_OVERRIDE"
   fi
   
+  # Ensure docker-compose.yml is generated before continuing
+  _ensure_docker_compose_file || exit 1
+  
   # Ensure dist directory is ready for build
   ensure_dist_for_build || exit 1
   
@@ -2285,6 +2455,9 @@ elif [[ "$COMMAND" == "restart" ]]; then
   echo -e "${CYAN}Stopping containers...${NC}"
   docker compose down
   
+  # Ensure docker-compose.yml is generated before continuing
+  _ensure_docker_compose_file || exit 1
+  
   # Ensure dist directory is ready for build
   ensure_dist_for_build || exit 1
   
@@ -2395,111 +2568,114 @@ elif [[ "$COMMAND" == "link" ]]; then
   _link_dev_files "$TARGET_DIR"
   exit 0
 
+elif [[ "$COMMAND" == "compose" ]]; then
+  # We need to run generate_compose.py from the mcp_server directory
+  MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
+  
+  if [ ! -d "$MCP_SERVER_DIR" ]; then
+    echo -e "${RED}Error: mcp_server directory not found at $MCP_SERVER_DIR${NC}"
+    exit 1
+  fi
+
+  # Save current directory to return to it afterwards
+  CURRENT_DIR=$(pwd)
+  
+  echo -e "${BOLD}Generating docker-compose.yml from templates...${NC}"
+  echo -e "Running from: ${CYAN}$MCP_SERVER_DIR${NC}"
+  
+  # Change to mcp_server directory where the script is located
+  cd "$MCP_SERVER_DIR"
+  
+  # Run the generation script
+  python generate_compose.py
+  RESULT=$?
+  
+  # Check the result and provide appropriate feedback
+  if [ $RESULT -eq 0 ]; then
+    echo -e "${GREEN}Successfully generated docker-compose.yml file.${NC}"
+  else
+    echo -e "${RED}Error: Failed to generate docker-compose.yml file.${NC}"
+  fi
+  
+  # Return to original directory
+  cd "$CURRENT_DIR"
+  
+  exit $RESULT
+
 else
   echo "Error: Unknown command '$COMMAND'"
   usage
 fi
 ````
 
-## File: scripts/README.md
-````markdown
-# Graphiti Symlinking Script
-
-This script facilitates the reuse of entity type definitions and Docker Compose configuration from the mcp-graphiti repository in other projects.
-
-## Installation
-
-1.  **Set Environment Variable:** Set the `MCP_GRAPHITI_REPO_PATH` environment variable to the absolute path of your `mcp-graphiti` repository. This tells the script where to find the source files.
-
-    ```bash
-    export MCP_GRAPHITI_REPO_PATH="/path/to/your/mcp-graphiti"
-    ```
-
-    *Note:* You might want to add this line to your shell configuration file (e.g., `~/.zshrc` or `~/.bashrc`) so it's set automatically in new terminal sessions.
-
-2.  **Make Globally Executable (Recommended):** To run the `graphiti` command from anywhere, create a symbolic link in a directory that is part of your system's `PATH`. The standard location `/usr/local/bin` is recommended.
-
-    Navigate to the root directory of the `mcp-graphiti` repository in your terminal and run:
-
-    ```bash
-    sudo ln -sf "$(pwd)/mcp_server/scripts/graphiti" /usr/local/bin/graphiti
-    ```
-
-    This command requires administrator privileges (`sudo`). It creates a symlink named `graphiti` in `/usr/local/bin` that points to the actual script.
-
-    *Verification:* You can verify the link by running `which graphiti`. It should output `/usr/local/bin/graphiti`.
-
-3.  **Ensure Executable Permissions:** The script needs execute permissions. This was likely set during creation, but you can ensure it with:
-
-    ```bash
-    chmod +x mcp_server/scripts/graphiti
-    ```
-
-## Usage
-
-Once installed and configured, you can use the `graphiti` command.
-
-### Basic Usage
-
-Run the command in the directory where you want to create the symlinks:
-
-```bash
-graphiti
-```
-
-This will create `entity_types` and `docker-compose.yml` symlinks in the current directory (`.`).
-
-### Specify Target Directory
-
-To create the symlinks in a specific directory, provide the path as an argument:
-
-```bash
-graphiti /path/to/your/other/project
-```
-
-### What It Does
-
-The script creates two symbolic links in the target directory:
-
-1.  `entity_types` -> Points to `$MCP_GRAPHITI_REPO_PATH/mcp_server/entity_types`
-2.  `docker-compose.yml` -> Points to `$MCP_GRAPHITI_REPO_PATH/mcp_server/docker-compose.yml`
-
-This allows you to easily reuse the shared entity type definitions and Docker Compose setup from the `mcp-graphiti` repository across different projects.
-
-### Error Handling
-
-*   The script will exit with an error if the `MCP_GRAPHITI_REPO_PATH` environment variable is not set.
-*   It will also exit if the source directory (`$MCP_GRAPHITI_REPO_PATH/mcp_server`) does not exist.
-````
-
 ## File: .env.example
 ````
 # Graphiti MCP Server Environment Configuration
 
+# --- Required Secrets ---
 # Neo4j Database Configuration
 # These settings are used to connect to your Neo4j database
-NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
-NEO4J_PASSWORD=demodemo
+NEO4J_PASSWORD=your_strong_neo4j_password_here
 
 # OpenAI API Configuration
 # Required for LLM operations
 OPENAI_API_KEY=your_openai_api_key_here
 MODEL_NAME=gpt-4o
 
-# Optional: Only needed for non-standard OpenAI endpoints
+# --- Optional Configuration ---
+# OpenAI Base URL (if not using the standard OpenAI API endpoint)
 # OPENAI_BASE_URL=https://api.openai.com/v1
 
-# Optional: Group ID for namespacing graph data
-# GROUP_ID=my_project
+# --- Neo4j Connection Configuration ---
+# Host ports - ports exposed on your local machine
+NEO4J_HOST_HTTP_PORT=7474
+NEO4J_HOST_BOLT_PORT=7687
 
-# Optional: Path configuration for Docker
-# PATH=/root/.local/bin:${PATH}
+# Container ports - ports used inside the container (rarely need to change)
+# NEO4J_CONTAINER_HTTP_PORT=7474
+# NEO4J_CONTAINER_BOLT_PORT=7687
 
-# Optional: Memory settings for Neo4j (used in Docker Compose)
-# NEO4J_server_memory_heap_initial__size=512m
-# NEO4J_server_memory_heap_max__size=1G
-# NEO4J_server_memory_pagecache_size=512m
+# Neo4j Memory Settings
+# NEO4J_HEAP_INITIAL=512m # Initial heap size for Neo4j
+# NEO4J_HEAP_MAX=1G # Maximum heap size for Neo4j
+# NEO4J_PAGECACHE=512m # Page cache size for Neo4j
+
+# --- MCP Server Configuration ---
+# Default internal port used by all MCP servers
+MCP_ROOT_CONTAINER_PORT=8000
+
+# Root MCP Server (Required)
+MCP_ROOT_CONTAINER_NAME=graphiti-mcp-root
+MCP_ROOT_HOST_PORT=8000
+
+# --- Custom MCP Servers (Required if uncommented in docker-compose.yml) ---
+# Civilization 7 MCP Server
+CIV7_CONTAINER_NAME=mcp-civ7
+CIV7_PORT=8001
+
+# Filesystem MCP Server
+FILESYSTEM_CONTAINER_NAME=mcp-filesystem
+FILESYSTEM_PORT=8002
+
+# Magic Candidates MCP Server
+CANDIDATES_CONTAINER_NAME=mcp-candidates
+CANDIDATES_PORT=8004
+
+# --- Neo4j Container Name ---
+NEO4J_CONTAINER_NAME=graphiti-mcp-neo4j
+
+# --- Logging Configuration ---
+GRAPHITI_LOG_LEVEL=info
+
+# --- DANGER ZONE ---
+# !!! WARNING !!! UNCOMMENTING AND SETTING THE FOLLOWING VARIABLE TO "true" WILL:
+# - PERMANENTLY DELETE ALL DATA in the Neo4j database
+# - Affect ALL knowledge graphs, not just a specific group
+# - Cannot be undone once executed
+# Only uncomment and set to "true" when you specifically need to clear all data
+# Always comment out or set back to "false" immediately after use
+# NEO4J_DESTROY_ENTIRE_GRAPH=true
 ````
 
 ## File: .python-version
@@ -2515,180 +2691,444 @@ MODEL_NAME=gpt-4o
 # tmp/
 ````
 
-## File: docker-compose.yml
+## File: base-compose.yaml
 ````yaml
+# base-compose.yaml
+# Base structure for the Docker Compose configuration, including static services and anchors.
+
 version: "3.8"
-x-healthcheck: &healthcheck
-  test: ["CMD-SHELL", "curl -s -I --max-time 1 http://localhost:8000/sse | grep -q 'text/event-stream' || exit 1"]
+
+# --- Base Definitions (Anchors) ---
+# Anchors are defined here and will be loaded by the Python script.
+
+x-mcp-healthcheck: &mcp-healthcheck
+  test:
+    [
+      "CMD-SHELL",
+      "curl -s -I --max-time 1 http://localhost:${MCP_ROOT_CONTAINER_PORT:-8000}/sse | grep -q 'text/event-stream' || exit 1",
+    ]
   interval: 30s
   timeout: 10s
   retries: 5
   start_period: 5s
-x-model-version: &model-version
-  MODEL_NAME: "o3-mini"
-x-common-env: &common-env
-  NEO4J_URI: "bolt://neo4j:7687"
-  NEO4J_USER: "neo4j"
-  NEO4J_PASSWORD: "demodemo"
-  OPENAI_API_KEY: ${OPENAI_API_KEY}
-  GRAPHITI_LOG_LEVEL: ${GRAPHITI_LOG_LEVEL:-info}
-  PATH: "/root/.local/bin:${PATH}"
 
+x-neo4j-connection: &neo4j-connection
+  NEO4J_URI: "bolt://neo4j:${NEO4J_CONTAINER_BOLT_PORT:-7687}"
+  NEO4J_USER: "${NEO4J_USER}"
+  NEO4J_PASSWORD: "${NEO4J_PASSWORD}"
+
+x-mcp-env: &mcp-env
+  MODEL_NAME: "${MODEL_NAME:-gpt-4o}"
+  OPENAI_API_KEY: ${OPENAI_API_KEY?Please set OPENAI_API_KEY in your .env file}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  GRAPHITI_LOG_LEVEL: ${GRAPHITI_LOG_LEVEL:-info}
+  PATH: "/app:/root/.local/bin:${PATH}"
+
+x-graphiti-mcp-base: &graphiti-mcp-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - path: .env
+      required: true
+  environment:
+    <<: [*mcp-env, *neo4j-connection] # Aliases refer to anchors above
+  healthcheck:
+    <<: *mcp-healthcheck             # Alias refers to anchor above
+  restart: unless-stopped
+
+x-graphiti-mcp-custom-base: &graphiti-mcp-custom-base
+  <<: *graphiti-mcp-base # Alias refers to anchor above
+  depends_on:
+    neo4j:
+      condition: service_healthy
+    graphiti-mcp-root:
+      condition: service_healthy
+
+# --- Services (Static Ones) ---
 services:
+  # --- Database ---
   neo4j:
     image: neo4j:5.26.0
+    container_name: ${NEO4J_CONTAINER_NAME:-graphiti-mcp-neo4j}
     ports:
-      - "7474:7474" # HTTP
-      - "7687:7687" # Bolt
+      - "${NEO4J_HOST_HTTP_PORT:-7474}:${NEO4J_CONTAINER_HTTP_PORT:-7474}"
+      - "${NEO4J_HOST_BOLT_PORT:-7687}:${NEO4J_CONTAINER_BOLT_PORT:-7687}"
     environment:
-      - NEO4J_AUTH=neo4j/demodemo
-      - NEO4J_server_memory_heap_initial__size=512m
-      - NEO4J_server_memory_heap_max__size=1G
-      - NEO4J_server_memory_pagecache_size=512m
+      - NEO4J_AUTH=${NEO4J_USER?Please set NEO4J_USER in your .env file}/${NEO4J_PASSWORD?Please set NEO4J_PASSWORD in your .env file}
+      - NEO4J_server_memory_heap_initial__size=${NEO4J_HEAP_INITIAL:-512m}
+      - NEO4J_server_memory_heap_max__size=${NEO4J_HEAP_MAX:-1G}
+      - NEO4J_server_memory_pagecache_size=${NEO4J_PAGECACHE:-512m}
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
     healthcheck:
-      test: ["CMD", "wget", "-O", "/dev/null", "http://localhost:7474"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "-O",
+          "/dev/null",
+          "http://localhost:${NEO4J_CONTAINER_HTTP_PORT:-7474}",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
 
-  graphiti-magic-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file:
-      - path: .env
-        required: false # Makes the file optional. Default value is 'true'
+  # --- Root MCP Server (Required) ---
+  graphiti-mcp-root:
+    <<: *graphiti-mcp-base # Alias refers to anchor above
+    container_name: ${MCP_ROOT_CONTAINER_NAME:-graphiti-mcp-root}
     depends_on:
       neo4j:
         condition: service_healthy
-    environment:
-      <<: [*model-version, *common-env]
-    healthcheck:
-      <<: *healthcheck
     ports:
-      - "8000:8000" # Expose the MCP server via HTTP for SSE transport
-    command: [
-      "uv", "run",
-      "graphiti_mcp_server.py",
-      "--transport", "sse",
-      "--group-id", "magic-api",
-      "--use-custom-entities",
-      "--entity-type-dir", "entity_types/base"
-    ]
-  graphiti-civ7:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file:
-      - path: .env
-        required: false # Makes the file optional. Default value is 'true'
-    depends_on:
-      graphiti-magic-api:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
+      - "${MCP_ROOT_HOST_PORT:-8000}:${MCP_ROOT_CONTAINER_PORT:-8000}"
     environment:
-      <<: [*model-version, *common-env]
-    healthcheck:
-      <<: *healthcheck
-    ports:
-      - "8001:8000" # Expose the MCP server via HTTP for SSE transport
-    command: [
-      "uv", "run",
-      "graphiti_mcp_server.py",
-      "--transport", "sse",
-      "--group-id", "civ7",
-      "--use-custom-entities",
-      "--entity-type-dir", "entity_types/example"
-    ]
-  graphiti-mcp-filesystem:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file:
-      - path: .env
-        required: false # Makes the file optional. Default value is 'true'
-    depends_on:
-      graphiti-magic-api:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-    environment:
-      <<: [*model-version, *common-env]
-    healthcheck:
-      <<: *healthcheck
-    ports:
-      - "8002:8000" # Expose the MCP server via HTTP for SSE transport
-    command: [
-      "uv", "run",
-      "graphiti_mcp_server.py",
-      "--transport", "sse",
-      "--group-id", "filesystem",
-      "--use-custom-entities",
-      "--entity-types", "Requirement", "Preference"
-    ]
-  graphiti-mcp-source:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file:
-      - path: .env
-        required: false # Makes the file optional. Default value is 'true'
-    depends_on:
-      graphiti-magic-api:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-    environment:
-      <<: [*model-version, *common-env]
-    healthcheck:
-      <<: *healthcheck
-    ports:
-      - "8003:8000" # Expose the MCP server via HTTP for SSE transport
-    command: [
-      "uv", "run",
-      "graphiti_mcp_server.py",
-      "--transport", "sse",
-      "--group-id", "graphiti-source",
-      "--use-custom-entities",
-      "--entity-type-dir", "entity_types/graphiti"
-    ]
-  graphiti-magic-candidates:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file:
-      - path: .env
-        required: false # Makes the file optional. Default value is 'true'
-    depends_on:
-      graphiti-magic-api:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-    environment:
-      <<: [*model-version, *common-env]
-    healthcheck:
-      <<: *healthcheck
-    ports:
-      - "8004:8000" # Expose the MCP server via HTTP for SSE transport
-    command: [
-      "uv", "run",
-      "graphiti_mcp_server.py",
-      "--transport", "sse",
-      "--group-id", "graphiti-candidates",
-      "--use-custom-entities",
-      "--entity-type-dir", "entity_types/candidates"
-    ]
+      # Specific env vars merged with base env vars via the alias above
+      MCP_GROUP_ID: "root"
+      MCP_USE_CUSTOM_ENTITIES: "true"
+      MCP_ENTITY_TYPE_DIR: "entity_types/base"
 
-    
-
+# --- Volumes ---
 volumes:
-  neo4j_data:
-  neo4j_logs:
+  neo4j_data: # Persists Neo4j graph data
+  neo4j_logs: # Persists Neo4j logs
+````
+
+## File: custom_servers.yaml
+````yaml
+# custom_servers.yaml
+# Configuration for custom Graphiti MCP services.
+# Defaults:
+# - container variable: <ID>_CONTAINER_NAME (e.g., CIV7_CONTAINER_NAME)
+# - port variable: <ID>_PORT (e.g., CIV7_PORT)
+# - port default value: 8001, 8002, ... based on order in this list
+# - dir: entity_types/<id> (e.g., entity_types/civ7)
+# - group_id: <id> (e.g., civ7)
+
+custom_mcp_servers:
+  - id: civ7 # Uses default container var (CIV7_CONTAINER_NAME), port var (CIV7_PORT:-8001), dir (entity_types/civ7), group_id (civ7)
+
+  - id: magic-api
+  
+  - id: filesystem
+    # Overriding default dir and setting types
+    # Uses default container var (FILESYSTEM_CONTAINER_NAME), port var (FILESYSTEM_PORT:-8002), group_id (filesystem)
+    dir: "entity_types/specific_fs" # Override default dir
+    types: "Requirement Preference"
+
+  - id: candidates
+    # Overriding default group_id and dir explicitly
+    # Uses default container var (CANDIDATES_CONTAINER_NAME), port var (CANDIDATES_PORT:-8003)
+    group_id: "graphiti-candidates" # Override default group_id
+    dir: "entity_types/candidates"  # Explicitly set dir (same as default here, just showing override)
+````
+
+## File: docker-compose.template.yml
+````yaml
+# docker-compose.template.yml
+# This is a template file for setting up Graphiti MCP servers with Docker Compose.
+# Copy this file to docker-compose.yml and customize as needed for your environment.
+version: "3.8"
+
+# --- Base Definitions ---
+# These YAML anchors provide reusable configuration blocks
+
+x-mcp-healthcheck:
+    &mcp-healthcheck # Healthcheck for all MCP servers
+    test:
+        [
+            "CMD-SHELL",
+            "curl -s -I --max-time 1 http://localhost:${MCP_ROOT_CONTAINER_PORT:-8000}/sse | grep -q 'text/event-stream' || exit 1",
+        ]
+    interval: 30s
+    timeout: 10s
+    retries: 5
+    start_period: 5s
+
+x-neo4j-connection: &neo4j-connection
+    # Neo4j connection details shared by all MCP servers
+    NEO4J_URI: "bolt://neo4j:${NEO4J_CONTAINER_BOLT_PORT:-7687}"
+    NEO4J_USER: "${NEO4J_USER}" # Required by neo4j service
+    NEO4J_PASSWORD: "${NEO4J_PASSWORD}" # Required by neo4j service 
+
+x-mcp-env: &mcp-env 
+    # Common environment variables for all MCP servers
+    MODEL_NAME: "${MODEL_NAME:-gpt-4o}"
+    OPENAI_API_KEY: ${OPENAI_API_KEY?Please set OPENAI_API_KEY in your .env file}
+    OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+    GRAPHITI_LOG_LEVEL: ${GRAPHITI_LOG_LEVEL:-info}
+    PATH: "/app:/root/.local/bin:${PATH}"
+
+# Base definition for ALL graphiti MCP services
+x-graphiti-mcp-base: &graphiti-mcp-base
+    build:
+        context: .
+        dockerfile: Dockerfile # Dockerfile must include the entrypoint.sh script
+    env_file:
+        - path: .env
+          required: true # Required by default (can be set to false if you want to provide all env vars directly)
+    environment:
+        <<: [*mcp-env, *neo4j-connection] # Merge environment variable blocks
+    healthcheck:
+        <<: *mcp-healthcheck
+    restart: unless-stopped
+    # Command execution is handled by entrypoint.sh using environment variables
+
+# Base for custom MCP services that depend on the root service
+x-graphiti-mcp-custom-base: &graphiti-mcp-custom-base
+    <<: *graphiti-mcp-base # Inherit base configuration
+    depends_on:
+        neo4j:
+            condition: service_healthy
+        graphiti-mcp-root: # All custom services depend on the root service
+            condition: service_healthy
+
+# --- Services ---
+services:
+    # --- Database Service ---
+    neo4j:
+        image: neo4j:5.26.0
+        container_name: ${NEO4J_CONTAINER_NAME:-graphiti-mcp-neo4j}
+        ports:
+            - "${NEO4J_HOST_HTTP_PORT:-7474}:${NEO4J_CONTAINER_HTTP_PORT:-7474}" # HTTP interface
+            - "${NEO4J_HOST_BOLT_PORT:-7687}:${NEO4J_CONTAINER_BOLT_PORT:-7687}" # Bolt protocol
+        environment:
+            - NEO4J_AUTH=${NEO4J_USER?Please set NEO4J_USER in your .env file}/${NEO4J_PASSWORD?Please set NEO4J_PASSWORD in your .env file}
+            - NEO4J_server_memory_heap_initial__size=${NEO4J_HEAP_INITIAL:-512m}
+            - NEO4J_server_memory_heap_max__size=${NEO4J_HEAP_MAX:-1G}
+            - NEO4J_server_memory_pagecache_size=${NEO4J_PAGECACHE:-512m}
+        volumes:
+            - neo4j_data:/data # Persists graph data
+            - neo4j_logs:/logs # Stores Neo4j logs
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "-O",
+                    "/dev/null",
+                    "http://localhost:${NEO4J_CONTAINER_HTTP_PORT:-7474}",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 30s
+
+    # --- Root MCP Server (Required) ---
+    # This is the primary MCP server instance required for all setups
+    graphiti-mcp-root:
+        <<: *graphiti-mcp-base
+        container_name: ${MCP_ROOT_CONTAINER_NAME:-graphiti-mcp-root}
+        depends_on:
+            neo4j:
+                condition: service_healthy
+        ports:
+            - "${MCP_ROOT_HOST_PORT:-8000}:${MCP_ROOT_CONTAINER_PORT:-8000}"
+        environment:
+            # Configuration for entrypoint.sh
+            MCP_GROUP_ID: "root" # Unique group ID for this MCP instance
+            MCP_USE_CUSTOM_ENTITIES: "true"
+            MCP_ENTITY_TYPE_DIR: "entity_types/base"
+            # MCP_ENTITY_TYPES: "" # Use this to specify specific entity types
+            # NEO4J_DESTROY_ENTIRE_GRAPH can be set to "true" to clear ALL Neo4j data (DANGER!)
+            # Not recommended to define here - use .env temporarily if needed
+
+    # --- Custom MCP Server Examples ---
+    # NAMING CONVENTION:
+    # - Service name: mcp-[project-name] (e.g., mcp-myproject)
+    # - Container name: MCP_[PROJECT]_CONTAINER_NAME in .env (e.g., MCP_MYPROJECT_CONTAINER_NAME=mcp-myproject)
+    # - Port: MCP_HOST_PORT_[PROJECT] in .env, incrementing from 8001 (e.g., MCP_HOST_PORT_MYPROJECT=8001)
+    # - Group ID: A unique identifier for your project's knowledge graph (e.g., "myproject")
+
+    # --- Custom MCP Server Example 1 (Optional) ---
+    # Uncomment this section to add a custom MCP server instance
+    # mcp-custom-1:
+    #     <<: *graphiti-mcp-custom-base
+    #     container_name: ${MCP_CUSTOM_1_CONTAINER_NAME}
+    #     ports:
+    #         - "${MCP_CUSTOM_HOST_PORT_1}:${MCP_ROOT_CONTAINER_PORT:-8000}"
+    #     environment:
+    #         MCP_GROUP_ID: "custom-group-1" # Unique ID for this knowledge graph
+    #         MCP_USE_CUSTOM_ENTITIES: "true"
+    #         MCP_ENTITY_TYPE_DIR: "entity_types/custom_1"
+    #         # MCP_ENTITY_TYPES: "" # Use this to specify specific entity types
+    #         # NEO4J_DESTROY_ENTIRE_GRAPH can be set to "true" to clear ALL Neo4j data
+    #         # Not recommended to define here - use .env temporarily if needed
+
+    # --- Custom MCP Server Example 2 (Optional) ---
+    # This example shows using specific entity types instead of a directory
+    # mcp-custom-2:
+    #     <<: *graphiti-mcp-custom-base
+    #     container_name: ${MCP_CUSTOM_2_CONTAINER_NAME}
+    #     ports:
+    #         - "${MCP_CUSTOM_HOST_PORT_2}:${MCP_ROOT_CONTAINER_PORT:-8000}"
+    #     environment:
+    #         MCP_GROUP_ID: "another-custom-group"
+    #         MCP_USE_CUSTOM_ENTITIES: "true"
+    #         # MCP_ENTITY_TYPE_DIR: ""
+    #         MCP_ENTITY_TYPES: "SpecificTypeA SpecificTypeB"
+    #         # NEO4J_DESTROY_ENTIRE_GRAPH can be set to "true" to clear ALL Neo4j data
+    #         # Not recommended to define here - use .env temporarily if needed
+
+    # --- Add your custom MCP server definitions below ---
+    # Copy one of the examples above and modify as needed
+    # Each service must have a unique:
+    # - container_name
+    # - port mapping
+    # - MCP_GROUP_ID
+
+# --- Persistent Storage ---
+volumes:
+    neo4j_data: # Persists Neo4j graph data between container restarts
+    neo4j_logs: # Persists Neo4j logs between container restarts
+````
+
+## File: docker-compose.yml
+````yaml
+# Generated by generate_compose.py
+# Do not edit this file directly. Modify base-compose.yaml or custom_servers.yaml instead.
+
+# --- Custom MCP Services Info ---
+# Default Ports: Assigned sequentially starting from 8001 (8000 + index + 1)
+#              Can be overridden by setting the corresponding <ID>_PORT env var
+#              or by specifying a different `port` variable in custom_servers.yaml.
+
+# base-compose.yaml
+# Base structure for the Docker Compose configuration, including static services and anchors.
+
+version: "3.8"
+
+# --- Base Definitions (Anchors) ---
+# Anchors are defined here and will be loaded by the Python script.
+
+x-mcp-healthcheck: &mcp-healthcheck
+  test: ["CMD-SHELL", "curl -s -I --max-time 1 http://localhost:${MCP_ROOT_CONTAINER_PORT:-8000}/sse
+        | grep -q 'text/event-stream' || exit 1"]
+  interval: 30s
+  timeout: 10s
+  retries: 5
+  start_period: 5s
+
+x-neo4j-connection: &neo4j-connection
+  NEO4J_URI: "bolt://neo4j:${NEO4J_CONTAINER_BOLT_PORT:-7687}"
+  NEO4J_USER: "${NEO4J_USER}"
+  NEO4J_PASSWORD: "${NEO4J_PASSWORD}"
+
+x-mcp-env: &mcp-env
+  MODEL_NAME: "${MODEL_NAME:-gpt-4o}"
+  OPENAI_API_KEY: ${OPENAI_API_KEY?Please set OPENAI_API_KEY in your .env file}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  GRAPHITI_LOG_LEVEL: ${GRAPHITI_LOG_LEVEL:-info}
+  PATH: "/app:/root/.local/bin:${PATH}"
+
+x-graphiti-mcp-base: &graphiti-mcp-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - path: .env
+      required: true
+  environment:
+    <<: [*mcp-env, *neo4j-connection]
+  healthcheck:
+    <<: *mcp-healthcheck
+                                     # Alias refers to anchor above
+  restart: unless-stopped
+
+x-graphiti-mcp-custom-base: &graphiti-mcp-custom-base
+  <<: *graphiti-mcp-base
+                         # Alias refers to anchor above
+  depends_on:
+    neo4j:
+      condition: service_healthy
+    graphiti-mcp-root:
+      condition: service_healthy
+
+# --- Services (Static Ones) ---
+services:
+  # --- Database ---
+  neo4j:
+    image: neo4j:5.26.0
+    container_name: ${NEO4J_CONTAINER_NAME:-graphiti-mcp-neo4j}
+    ports:
+      - "${NEO4J_HOST_HTTP_PORT:-7474}:${NEO4J_CONTAINER_HTTP_PORT:-7474}"
+      - "${NEO4J_HOST_BOLT_PORT:-7687}:${NEO4J_CONTAINER_BOLT_PORT:-7687}"
+    environment:
+      - NEO4J_AUTH=${NEO4J_USER?Please set NEO4J_USER in your .env file}/${NEO4J_PASSWORD?Please
+        set NEO4J_PASSWORD in your .env file}
+      - NEO4J_server_memory_heap_initial__size=${NEO4J_HEAP_INITIAL:-512m}
+      - NEO4J_server_memory_heap_max__size=${NEO4J_HEAP_MAX:-1G}
+      - NEO4J_server_memory_pagecache_size=${NEO4J_PAGECACHE:-512m}
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "wget", "-O", "/dev/null", "http://localhost:${NEO4J_CONTAINER_HTTP_PORT:-7474}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # --- Root MCP Server (Required) ---
+  graphiti-mcp-root:
+    <<: *graphiti-mcp-base
+                           # Alias refers to anchor above
+    container_name: ${MCP_ROOT_CONTAINER_NAME:-graphiti-mcp-root}
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    ports:
+      - "${MCP_ROOT_HOST_PORT:-8000}:${MCP_ROOT_CONTAINER_PORT:-8000}"
+    environment:
+      # Specific env vars merged with base env vars via the alias above
+      MCP_GROUP_ID: "root"
+      MCP_USE_CUSTOM_ENTITIES: "true"
+      MCP_ENTITY_TYPE_DIR: "entity_types/base"
+
+# --- Volumes ---
+  mcp-civ7:
+    <<: *graphiti-mcp-custom-base
+    container_name: ${CIV7_CONTAINER_NAME}
+    ports:
+      - ${CIV7_PORT:-8001}:${MCP_ROOT_CONTAINER_PORT:-8000}
+    environment:
+      MCP_GROUP_ID: civ7
+      MCP_USE_CUSTOM_ENTITIES: 'true'
+      MCP_ENTITY_TYPE_DIR: entity_types/civ7
+  mcp-magic-api:
+    <<: *graphiti-mcp-custom-base
+    container_name: ${MAGIC_API_CONTAINER_NAME}
+    ports:
+      - ${MAGIC_API_PORT:-8002}:${MCP_ROOT_CONTAINER_PORT:-8000}
+    environment:
+      MCP_GROUP_ID: magic-api
+      MCP_USE_CUSTOM_ENTITIES: 'true'
+      MCP_ENTITY_TYPE_DIR: entity_types/magic-api
+  mcp-filesystem:
+    <<: *graphiti-mcp-custom-base
+    container_name: ${FILESYSTEM_CONTAINER_NAME}
+    ports:
+      - ${FILESYSTEM_PORT:-8003}:${MCP_ROOT_CONTAINER_PORT:-8000}
+    environment:
+      MCP_GROUP_ID: filesystem
+      MCP_USE_CUSTOM_ENTITIES: 'true'
+      MCP_ENTITY_TYPE_DIR: entity_types/specific_fs
+      MCP_ENTITY_TYPES: Requirement Preference
+  mcp-candidates:
+    <<: *graphiti-mcp-custom-base
+    container_name: ${CANDIDATES_CONTAINER_NAME}
+    ports:
+      - ${CANDIDATES_PORT:-8004}:${MCP_ROOT_CONTAINER_PORT:-8000}
+    environment:
+      MCP_GROUP_ID: graphiti-candidates
+      MCP_USE_CUSTOM_ENTITIES: 'true'
+      MCP_ENTITY_TYPE_DIR: entity_types/candidates
+volumes:
+  neo4j_data: # Persists Neo4j graph data
+  neo4j_logs: # Persists Neo4j logs
 ````
 
 ## File: Dockerfile
@@ -2714,17 +3154,269 @@ COPY dist/* /dist/
 # Copy pyproject.toml and install dependencies
 COPY pyproject.toml .
 RUN uv sync
+# RUN chmod +x $(which uv)
 
 # Copy necessary application code and directories into /app/
 # The destination must end with '/' when copying directories
 COPY graphiti_mcp_server.py ./
 COPY entity_types/ ./entity_types/
 
+# --- Add Entrypoint Script ---
+# Copy the entrypoint script into the working directory
+COPY entrypoint.sh .
+# Make it executable
+RUN chmod +x ./entrypoint.sh
+# ---------------------------
+
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 
-# Command to run the application
-CMD ["uv", "run", "graphiti_mcp_server.py"]
+# # Create a non-root user and group
+# RUN groupadd --system appuser && useradd --system --gid appuser appuser
+
+# # Change ownership of the app directory to the new user
+# # Ensure entrypoint.sh is also owned correctly
+# RUN chown -R appuser:appuser /app
+
+# # Switch to the non-root user
+# USER appuser
+
+# --- Set Entrypoint ---
+# Use the script as the main container command
+ENTRYPOINT ["./entrypoint.sh"]
+
+# Original CMD instruction has been replaced by the ENTRYPOINT above
+# CMD ["uv", "run", "graphiti_mcp_server.py"]
+````
+
+## File: entrypoint.sh
+````bash
+#!/bin/sh
+# docker-entrypoint.sh
+# This script constructs and executes the graphiti_mcp_server command
+# based on environment variables set in docker-compose.yml.
+
+# Exit immediately if a command exits with a non-zero status.
+set -e
+
+# Base command parts
+CMD_PREFIX="uv run graphiti_mcp_server.py"
+CMD_ARGS="--transport sse" # Common arguments
+
+# Append arguments based on environment variables
+
+# --group-id (Required or has default handling in script?)
+if [ -n "$MCP_GROUP_ID" ]; then
+  CMD_ARGS="$CMD_ARGS --group-id \"$MCP_GROUP_ID\""
+else
+  echo "Warning: MCP_GROUP_ID environment variable not set."
+  # Decide: exit 1? Or let the python script handle default/error?
+fi
+
+# --use-custom-entities (Boolean flag)
+# Adjust check if different values like "1", "yes" are used
+if [ "$MCP_USE_CUSTOM_ENTITIES" = "true" ]; then
+  CMD_ARGS="$CMD_ARGS --use-custom-entities"
+fi
+
+# --entity-type-dir (Optional path)
+if [ -n "$MCP_ENTITY_TYPE_DIR" ]; then
+  CMD_ARGS="$CMD_ARGS --entity-type-dir \"$MCP_ENTITY_TYPE_DIR\""
+fi
+
+# --entity-types (Optional space-separated list)
+# Assumes the python script handles a space-separated list after the flag.
+if [ -n "$MCP_ENTITY_TYPES" ]; then
+   CMD_ARGS="$CMD_ARGS --entity-types $MCP_ENTITY_TYPES"
+fi
+
+# --destroy-graph (Boolean flag)
+if [ "$NEO4J_DESTROY_ENTIRE_GRAPH" = "true" ]; then
+  CMD_ARGS="$CMD_ARGS --destroy-graph"
+  echo "!!! DANGER !!! NEO4J_DESTROY_ENTIRE_GRAPH flag is set to 'true'."
+  echo "!!! WARNING !!! This will PERMANENTLY DELETE ALL DATA in the Neo4j database, not just data for this group."
+  echo "                 Set to 'false' immediately after use to prevent accidental data loss."
+fi
+
+# Add logic for any other configurable flags here...
+
+# Combine prefix and arguments
+FULL_CMD="$CMD_PREFIX $CMD_ARGS"
+
+echo "--------------------------------------------------"
+echo " Running MCP Server with Group ID: ${MCP_GROUP_ID:-<Not Set>}"
+echo " Executing command: $FULL_CMD"
+echo "--------------------------------------------------"
+
+# Use 'exec' to replace the shell process with the Python process.
+# "$@" passes along any arguments that might have been added via
+# 'command:' in docker-compose.yml (though we aren't using them here).
+exec $FULL_CMD "$@"
+````
+
+## File: generate_compose.py
+````python
+#!/usr/bin/env python3
+"""
+Generate docker-compose.yml by combining base-compose.yaml with custom server definitions
+from custom_servers.yaml using ruamel.yaml to preserve anchors and aliases.
+"""
+
+# Use ruamel.yaml instead of pyyaml
+from ruamel.yaml import YAML
+from ruamel.yaml.scalarstring import LiteralScalarString # For multi-line strings potentially
+from ruamel.yaml.comments import CommentedMap # For adding merge keys
+import sys
+import os
+
+# --- Configuration ---
+BASE_COMPOSE_FILE = 'base-compose.yaml'
+CUSTOM_SERVERS_CONFIG_FILE = 'custom_servers.yaml'
+OUTPUT_COMPOSE_FILE = 'docker-compose.yml'
+# Default container port used in port mappings for custom servers
+DEFAULT_MCP_CONTAINER_PORT_VAR = "MCP_ROOT_CONTAINER_PORT:-8000"
+# Starting port number for default calculation
+DEFAULT_PORT_START = 8000
+
+# --- Initialize ruamel.yaml ---
+# Use the round-trip loader/dumper to preserve structure
+yaml = YAML()
+yaml.preserve_quotes = True # Optional: Preserve quotes if needed
+yaml.indent(mapping=2, sequence=4, offset=2) # Standard Docker Compose indentation
+
+# --- Load Base Docker Compose Structure ---
+try:
+    with open(BASE_COMPOSE_FILE, 'r') as f:
+        # Use ruamel.yaml load
+        compose_data = yaml.load(f)
+except FileNotFoundError:
+    print(f"Error: Base configuration file '{BASE_COMPOSE_FILE}' not found.")
+    sys.exit(1)
+except Exception as e: # Catch ruamel.yaml errors
+    print(f"Error parsing base YAML file '{BASE_COMPOSE_FILE}': {e}")
+    sys.exit(1)
+
+if not isinstance(compose_data, dict) or 'services' not in compose_data or not isinstance(compose_data.get('services'), dict):
+     print(f"Error: Invalid structure in '{BASE_COMPOSE_FILE}'. Must be a dictionary with a 'services' key.")
+     sys.exit(1)
+
+# --- Load Custom Server Configurations ---
+# Use safe loader for config data
+custom_yaml = YAML(typ='safe')
+try:
+    with open(CUSTOM_SERVERS_CONFIG_FILE, 'r') as f:
+        custom_config = custom_yaml.load(f)
+except FileNotFoundError:
+    print(f"Error: Custom servers configuration file '{CUSTOM_SERVERS_CONFIG_FILE}' not found.")
+    sys.exit(1)
+except Exception as e: # Catch ruamel.yaml errors
+    print(f"Error parsing custom servers YAML file '{CUSTOM_SERVERS_CONFIG_FILE}': {e}")
+    sys.exit(1)
+
+if not custom_config or 'custom_mcp_servers' not in custom_config:
+    print(f"Warning: Invalid format or missing 'custom_mcp_servers' key in '{CUSTOM_SERVERS_CONFIG_FILE}'. No custom services will be added.")
+    custom_mcp_servers = []
+else:
+    custom_mcp_servers = custom_config.get('custom_mcp_servers', [])
+    if not isinstance(custom_mcp_servers, list):
+        print(f"Warning: 'custom_mcp_servers' in '{CUSTOM_SERVERS_CONFIG_FILE}' is not a list. No custom services will be added.")
+        custom_mcp_servers = []
+
+
+# --- Generate and Add Custom Service Definitions ---
+# Ensure 'services' key exists and is a CommentedMap (should be from ruamel load)
+if 'services' not in compose_data: compose_data['services'] = CommentedMap()
+services_map = compose_data['services']
+
+# Retrieve the object associated with the anchor we want to merge
+# We need the actual Python object that &graphiti-mcp-custom-base points to.
+# ruamel.yaml stores anchors separately. We need to find the object.
+# Let's assume the object is directly accessible via its key in the top-level map.
+custom_base_anchor_obj = compose_data.get('x-graphiti-mcp-custom-base')
+
+if not custom_base_anchor_obj:
+    print("Error: Could not find the 'x-graphiti-mcp-custom-base' definition in base YAML.")
+    sys.exit(1)
+
+for n, server_conf in enumerate(custom_mcp_servers):
+    if not isinstance(server_conf, dict):
+        print(f"Warning: Skipping item at index {n} in 'custom_mcp_servers' as it's not a dictionary: {server_conf}")
+        continue
+
+    server_id = server_conf.get('id')
+    if not server_id:
+        print(f"Warning: Skipping server config at index {n} due to missing required field 'id': {server_conf}")
+        continue
+
+    # --- Apply Defaults ---
+    container_name_var = server_conf.get('container', f"{server_id.upper().replace('-', '_')}_CONTAINER_NAME") # Ensure valid env var name
+    port_var = server_conf.get('port', f"{server_id.upper().replace('-', '_')}_PORT") # Ensure valid env var name
+    default_port_value = DEFAULT_PORT_START + n + 1
+    entity_type_dir = server_conf.get('dir', f"entity_types/{server_id}")
+    mcp_group_id = server_conf.get('group_id', server_id)
+    entity_types = server_conf.get('types')
+    # --- End Defaults ---
+
+    service_name = f"mcp-{server_id}"
+    port_mapping = f"${{{port_var}:-{default_port_value}}}:${{{DEFAULT_MCP_CONTAINER_PORT_VAR}}}"
+
+    # Use CommentedMap for the service definition to allow adding merge key
+    new_service = CommentedMap()
+    new_service['container_name'] = f"${{{container_name_var}}}"
+    new_service['ports'] = [port_mapping] # List of ports
+
+    # Create environment map
+    env_vars = CommentedMap()
+    env_vars['MCP_GROUP_ID'] = mcp_group_id
+    env_vars['MCP_USE_CUSTOM_ENTITIES'] = "true" # Env vars are strings
+
+    if entity_type_dir is not None:
+        env_vars['MCP_ENTITY_TYPE_DIR'] = entity_type_dir
+    if entity_types is not None:
+        # Handle multi-line strings correctly if needed
+        if '\n' in entity_types:
+             env_vars['MCP_ENTITY_TYPES'] = LiteralScalarString(entity_types)
+        else:
+             env_vars['MCP_ENTITY_TYPES'] = entity_types
+
+    new_service['environment'] = env_vars
+
+    # IMPORTANT: Add the merge key using ruamel.yaml's merge feature
+    # We provide the Python object that was defined with the anchor.
+    # The list [(0, custom_base_anchor_obj)] means insert merge at index 0
+    new_service.add_yaml_merge([(0, custom_base_anchor_obj)])
+
+    # Add the fully constructed service definition to the services map
+    services_map[service_name] = new_service
+
+
+# --- Write the final combined docker-compose.yml ---
+try:
+    with open(OUTPUT_COMPOSE_FILE, 'w') as f:
+        # Add header comment
+        header = [
+            "# Generated by generate_compose.py",
+            "# Do not edit this file directly. Modify base-compose.yaml or custom_servers.yaml instead.",
+            "",
+            "# --- Custom MCP Services Info ---",
+            "# Default Ports: Assigned sequentially starting from 8001 (8000 + index + 1)",
+            "#              Can be overridden by setting the corresponding <ID>_PORT env var",
+            "#              or by specifying a different `port` variable in custom_servers.yaml.",
+            "\n" # Add extra newline before YAML content
+        ]
+        f.write("\n".join(header))
+
+        # Dump the compose data using ruamel.yaml
+        yaml.dump(compose_data, f)
+
+    print(f"Successfully generated '{OUTPUT_COMPOSE_FILE}' using ruamel.yaml.")
+    print(f"Note: Default ports for custom services start at {DEFAULT_PORT_START + 1} and increment.")
+except IOError as e:
+    print(f"Error writing output file '{OUTPUT_COMPOSE_FILE}': {e}")
+    sys.exit(1)
+except Exception as e:
+    print(f"An unexpected error occurred during YAML dumping: {e}")
+    sys.exit(1)
 ````
 
 ## File: graphiti_mcp_server.py
@@ -2826,7 +3518,8 @@ class GraphitiConfig(BaseModel):
     including database connection details and LLM settings.
     """
 
-    neo4j_uri: str = 'bolt://localhost:7687'
+    # neo4j_uri: str = 'bolt://localhost:7687'
+    neo4j_uri: str = 'bolt://neo4j:7687'
     neo4j_user: str = 'neo4j'
     neo4j_password: str = 'password'
     openai_api_key: Optional[str] = None
@@ -2840,7 +3533,8 @@ class GraphitiConfig(BaseModel):
     def from_env(cls) -> 'GraphitiConfig':
         """Create a configuration instance from environment variables."""
         return cls(
-            neo4j_uri=os.environ.get('NEO4J_URI', 'bolt://localhost:7687'),
+            # neo4j_uri=os.environ.get('NEO4J_URI', 'bolt://localhost:7687'),
+            neo4j_uri=os.environ.get('NEO4J_URI', 'bolt://neo4j:7687'),
             neo4j_user=os.environ.get('NEO4J_USER', 'neo4j'),
             neo4j_password=os.environ.get('NEO4J_PASSWORD', 'password'),
             openai_api_key=os.environ.get('OPENAI_API_KEY'),
@@ -3778,281 +4472,8 @@ dependencies = [
     # "graphiti-core @ file:///dist/graphiti_core-0.8.5-py3-none-any.whl",
     # For production/normal use (uncomment this and comment out the above):
     "graphiti-core>=0.8.5",
+    "ruamel.yaml>=0.17.21",
 ]
-````
-
-## File: README.md
-````markdown
-# Graphiti MCP Server
-
-Graphiti is a framework for building and querying temporally-aware knowledge graphs, specifically tailored for AI agents operating in dynamic environments. Unlike traditional retrieval-augmented generation (RAG) methods, Graphiti continuously integrates user interactions, structured and unstructured enterprise data, and external information into a coherent, queryable graph. The framework supports incremental data updates, efficient retrieval, and precise historical queries without requiring complete graph recomputation, making it suitable for developing interactive, context-aware AI applications.
-
-This is an experimental Model Context Protocol (MCP) server implementation for Graphiti. The MCP server exposes Graphiti's key functionality through the MCP protocol, allowing AI assistants to interact with Graphiti's knowledge graph capabilities.
-
-## Features
-
-The Graphiti MCP server exposes the following key high-level functions of Graphiti:
-
-- **Episode Management**: Add, retrieve, and delete episodes (text, messages, or JSON data)
-- **Entity Management**: Search and manage entity nodes and relationships in the knowledge graph
-- **Search Capabilities**: Search for facts (edges) and node summaries using semantic and hybrid search
-- **Group Management**: Organize and manage groups of related data with group_id filtering
-- **Graph Maintenance**: Clear the graph and rebuild indices
-
-## Installation
-
-### Prerequisites
-
-1. Ensure you have Python 3.10 or higher installed.
-2. A running Neo4j database (version 5.26 or later required)
-3. OpenAI API key for LLM operations
-
-### Setup
-
-1. Clone the repository and navigate to the mcp_server directory
-2. Use `uv` to create a virtual environment and install dependencies:
-
-```bash
-# Install uv if you don't have it already
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Create a virtual environment and install dependencies in one step
-uv sync
-```
-
-## Configuration
-
-The server uses the following environment variables:
-
-- `NEO4J_URI`: URI for the Neo4j database (default: `bolt://localhost:7687`)
-- `NEO4J_USER`: Neo4j username (default: `neo4j`)
-- `NEO4J_PASSWORD`: Neo4j password (default: `demodemo`)
-- `OPENAI_API_KEY`: OpenAI API key (required for LLM operations)
-- `OPENAI_BASE_URL`: Optional base URL for OpenAI API
-- `MODEL_NAME`: Optional model name to use for LLM inference
-
-You can set these variables in a `.env` file in the project directory.
-
-## Running the Server
-
-To run the Graphiti MCP server directly using `uv`:
-
-```bash
-uv run graphiti_mcp_server.py
-```
-
-With options:
-
-```bash
-uv run graphiti_mcp_server.py --model gpt-4o --transport sse
-```
-
-Available arguments:
-
-- `--model`: Specify the model name to use with the LLM client
-- `--transport`: Choose the transport method (sse or stdio, default: sse)
-- `--group-id`: Set a namespace for the graph (optional)
-- `--destroy-graph`: Destroy all Graphiti graphs (use with caution)
-- `--use-custom-entities`: Enable entity extraction using the predefined ENTITY_TYPES
-
-### Docker Deployment
-
-The Graphiti MCP server can be deployed using Docker. The Dockerfile uses `uv` for package management, ensuring consistent dependency installation.
-
-#### Environment Configuration
-
-Before running the Docker Compose setup, you need to configure the environment variables. You have two options:
-
-1. **Using a .env file** (recommended):
-
-   - Copy the provided `.env.example` file to create a `.env` file:
-     ```bash
-     cp .env.example .env
-     ```
-   - Edit the `.env` file to set your OpenAI API key and other configuration options:
-     ```
-     # Required for LLM operations
-     OPENAI_API_KEY=your_openai_api_key_here
-     MODEL_NAME=gpt-4o
-     # Optional: OPENAI_BASE_URL only needed for non-standard OpenAI endpoints
-     # OPENAI_BASE_URL=https://api.openai.com/v1
-     ```
-   - The Docker Compose setup is configured to use this file if it exists (it's optional)
-
-2. **Using environment variables directly**:
-   - You can also set the environment variables when running the Docker Compose command:
-     ```bash
-     OPENAI_API_KEY=your_key MODEL_NAME=gpt-4o docker compose up
-     ```
-
-#### Neo4j Configuration
-
-The Docker Compose setup includes a Neo4j container with the following default configuration:
-
-- Username: `neo4j`
-- Password: `demodemo`
-- URI: `bolt://neo4j:7687` (from within the Docker network)
-- Memory settings optimized for development use
-
-#### Running with Docker Compose
-
-Start the services using Docker Compose:
-
-```bash
-docker compose up
-```
-
-Or if you're using an older version of Docker Compose:
-
-```bash
-docker-compose up
-```
-
-This will start both the Neo4j database and the Graphiti MCP server. The Docker setup:
-
-- Uses `uv` for package management and running the server
-- Installs dependencies from the `pyproject.toml` file
-- Connects to the Neo4j container using the environment variables
-- Exposes the server on port 8000 for HTTP-based SSE transport
-- Includes a healthcheck for Neo4j to ensure it's fully operational before starting the MCP server
-
-## Integrating with MCP Clients
-
-### Configuration
-
-To use the Graphiti MCP server with an MCP-compatible client, configure it to connect to the server:
-
-```json
-{
-  "mcpServers": {
-    "graphiti": {
-      "transport": "stdio",
-      "command": "uv",
-      "args": [
-        "run",
-        "/ABSOLUTE/PATH/TO/graphiti_mcp_server.py",
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "NEO4J_URI": "bolt://localhost:7687",
-        "NEO4J_USER": "neo4j",
-        "NEO4J_PASSWORD": "demodemo",
-        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-        "MODEL_NAME": "gpt-4o"
-      }
-    }
-  }
-}
-```
-
-For SSE transport (HTTP-based), you can use this configuration:
-
-```json
-{
-  "mcpServers": {
-    "graphiti": {
-      "transport": "sse",
-      "url": "http://localhost:8000/sse"
-    }
-  }
-}
-```
-
-Or start the server with uv and connect to it:
-
-```json
-{
-  "mcpServers": {
-    "graphiti": {
-      "command": "uv",
-      "args": [
-        "run",
-        "/ABSOLUTE/PATH/TO/graphiti_mcp_server.py",
-        "--transport",
-        "sse"
-      ],
-      "env": {
-        "NEO4J_URI": "bolt://localhost:7687",
-        "NEO4J_USER": "neo4j",
-        "NEO4J_PASSWORD": "demodemo",
-        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-        "MODEL_NAME": "gpt-4o"
-      }
-    }
-  }
-}
-```
-
-## Available Tools
-
-The Graphiti MCP server exposes the following tools:
-
-- `add_episode`: Add an episode to the knowledge graph (supports text, JSON, and message formats)
-- `search_nodes`: Search the knowledge graph for relevant node summaries
-- `search_facts`: Search the knowledge graph for relevant facts (edges between entities)
-- `delete_entity_edge`: Delete an entity edge from the knowledge graph
-- `delete_episode`: Delete an episode from the knowledge graph
-- `get_entity_edge`: Get an entity edge by its UUID
-- `get_episodes`: Get the most recent episodes for a specific group
-- `clear_graph`: Clear all data from the knowledge graph and rebuild indices
-- `get_status`: Get the status of the Graphiti MCP server and Neo4j connection
-
-For detailed usage instructions, known issues, and best practices, see the [MCP Tools Usage Guide](./docs/MCP_TOOLS_USAGE.md).
-
-## Working with JSON Data
-
-The Graphiti MCP server can process structured JSON data through the `add_episode` tool with `source="json"`. This allows you to automatically extract entities and relationships from structured data:
-
-```
-add_episode(
-    name="Customer Profile",
-    episode_body="{\"company\": {\"name\": \"Acme Technologies\"}, \"products\": [{\"id\": \"P001\", \"name\": \"CloudSync\"}, {\"id\": \"P002\", \"name\": \"DataMiner\"}]}",
-    source="json",
-    source_description="CRM data"
-)
-```
-
-## Integrating with the Cursor IDE
-
-To integrate the Graphiti MCP Server with the Cursor IDE, follow these steps:
-
-1. Run the Graphiti MCP server using the SSE transport:
-
-```bash
-python graphiti_mcp_server.py --transport sse --use-custom-entities --group-id <your_group_id>
-```
-
-Hint: specify a `group_id` to retain prior graph data. If you do not specify a `group_id`, the server will create a new graph
-
-2. Configure Cursor to connect to the Graphiti MCP server.
-
-```json
-{
-  "mcpServers": {
-    "Graphiti": {
-      "url": "http://localhost:8000/sse"
-    }
-  }
-}
-```
-
-3. Add the Graphiti rules to Cursor's User Rules. See [cursor_rules.md](cursor_rules.md) for details.
-
-4. Kick off an agent session in Cursor.
-
-The integration enables AI assistants in Cursor to maintain persistent memory through Graphiti's knowledge graph capabilities.
-
-## Requirements
-
-- Python 3.10 or higher
-- Neo4j database (version 5.26 or later required)
-- OpenAI API key (for LLM operations and embeddings)
-- MCP-compatible client
-
-## License
-
-This project is licensed under the same license as the Graphiti project.
 ````
 
 ## File: repomix.config.json
@@ -4082,7 +4503,12 @@ This project is licensed under the same license as the Graphiti project.
     "customPatterns": [
       ".venv/**",
       "uv.lock",
-      "dist/**"
+      "dist/**",
+      ".ai/.archive/**",
+      "llm_cache/**",
+      "scripts/README.md",
+      "README.md",
+      "docs/**"
     ]
   },
   "security": {

@@ -1,0 +1,11 @@
+# !! WARNING: This file is managed by the 'graphiti init' command. !!
+# !! Avoid manual edits unless absolutely necessary.                 !!
+#
+# Maps project names to their configuration details.
+# Paths should be absolute for reliability.
+projects: {}
+# Example Entry (will be added by 'graphiti init'):
+# alpha:
+#   config_file: /abs/path/to/project-alpha/mcp-config.yaml
+#   root_dir: /abs/path/to/project-alpha
+#   enabled: true 

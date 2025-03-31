@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate docker-compose.yml by combining base-compose.yaml with custom server definitions
-from custom_servers.yaml using ruamel.yaml to preserve anchors and aliases.
+from mcp-projects.yaml using ruamel.yaml to preserve anchors and aliases.
 """
 
 # Use ruamel.yaml instead of pyyaml
@@ -13,7 +13,7 @@ import os
 
 # --- Configuration ---
 BASE_COMPOSE_FILE = 'base-compose.yaml'
-CUSTOM_SERVERS_CONFIG_FILE = 'custom_servers.yaml'
+MCP_PROJECTS_FILE = 'mcp-projects.yaml'
 OUTPUT_COMPOSE_FILE = 'docker-compose.yml'
 # Default container port used in port mappings for custom servers
 DEFAULT_MCP_CONTAINER_PORT_VAR = "MCP_ROOT_CONTAINER_PORT:-8000"
@@ -42,27 +42,22 @@ if not isinstance(compose_data, dict) or 'services' not in compose_data or not i
      print(f"Error: Invalid structure in '{BASE_COMPOSE_FILE}'. Must be a dictionary with a 'services' key.")
      sys.exit(1)
 
-# --- Load Custom Server Configurations ---
-# Use safe loader for config data
-custom_yaml = YAML(typ='safe')
+# --- Load Project Registry ---
+# Use safe loader for registry data
+registry_yaml = YAML(typ='safe')
 try:
-    with open(CUSTOM_SERVERS_CONFIG_FILE, 'r') as f:
-        custom_config = custom_yaml.load(f)
+    with open(MCP_PROJECTS_FILE, 'r') as f:
+        projects_registry = registry_yaml.load(f)
 except FileNotFoundError:
-    print(f"Error: Custom servers configuration file '{CUSTOM_SERVERS_CONFIG_FILE}' not found.")
-    sys.exit(1)
+    print(f"Warning: Project registry file '{MCP_PROJECTS_FILE}' not found. No custom services will be added.")
+    projects_registry = {'projects': {}}
 except Exception as e: # Catch ruamel.yaml errors
-    print(f"Error parsing custom servers YAML file '{CUSTOM_SERVERS_CONFIG_FILE}': {e}")
+    print(f"Error parsing project registry file '{MCP_PROJECTS_FILE}': {e}")
     sys.exit(1)
 
-if not custom_config or 'custom_mcp_servers' not in custom_config:
-    print(f"Warning: Invalid format or missing 'custom_mcp_servers' key in '{CUSTOM_SERVERS_CONFIG_FILE}'. No custom services will be added.")
-    custom_mcp_servers = []
-else:
-    custom_mcp_servers = custom_config.get('custom_mcp_servers', [])
-    if not isinstance(custom_mcp_servers, list):
-        print(f"Warning: 'custom_mcp_servers' in '{CUSTOM_SERVERS_CONFIG_FILE}' is not a list. No custom services will be added.")
-        custom_mcp_servers = []
+if not projects_registry or 'projects' not in projects_registry:
+    print(f"Warning: Invalid format or missing 'projects' key in '{MCP_PROJECTS_FILE}'. No custom services will be added.")
+    projects_registry = {'projects': {}}
 
 
 # --- Generate and Add Custom Service Definitions ---
@@ -80,56 +75,106 @@ if not custom_base_anchor_obj:
     print("Error: Could not find the 'x-graphiti-mcp-custom-base' definition in base YAML.")
     sys.exit(1)
 
-for n, server_conf in enumerate(custom_mcp_servers):
-    if not isinstance(server_conf, dict):
-        print(f"Warning: Skipping item at index {n} in 'custom_mcp_servers' as it's not a dictionary: {server_conf}")
+overall_service_index = 0
+for project_name, project_data in projects_registry.get('projects', {}).items():
+    if not project_data.get('enabled', False):
         continue
-
-    server_id = server_conf.get('id')
-    if not server_id:
-        print(f"Warning: Skipping server config at index {n} due to missing required field 'id': {server_conf}")
+    
+    project_config_path = project_data.get('config_file')
+    if not project_config_path:
+        print(f"Warning: Skipping project '{project_name}' due to missing config_file path.")
         continue
+    
+    # Load project config file
+    try:
+        with open(project_config_path, 'r') as f:
+            project_config = registry_yaml.load(f)
+    except FileNotFoundError:
+        print(f"Warning: Project config file '{project_config_path}' not found for project '{project_name}'. Skipping.")
+        continue
+    except Exception as e:
+        print(f"Error parsing project config file '{project_config_path}' for project '{project_name}': {e}. Skipping.")
+        continue
+    
+    if not project_config or 'services' not in project_config:
+        print(f"Warning: Invalid format or missing 'services' key in '{project_config_path}'. No services will be added for project '{project_name}'.")
+        continue
+    
+    for server_conf in project_config.get('services', []):
+        if not isinstance(server_conf, dict):
+            print(f"Warning: Skipping service in project '{project_name}' as it's not a dictionary: {server_conf}")
+            continue
 
-    # --- Apply Defaults ---
-    container_name_var = server_conf.get('container', f"{server_id.upper().replace('-', '_')}_CONTAINER_NAME") # Ensure valid env var name
-    port_var = server_conf.get('port', f"{server_id.upper().replace('-', '_')}_PORT") # Ensure valid env var name
-    default_port_value = DEFAULT_PORT_START + n + 1
-    entity_type_dir = server_conf.get('dir', f"entity_types/{server_id}")
-    mcp_group_id = server_conf.get('group_id', server_id)
-    entity_types = server_conf.get('types')
-    # --- End Defaults ---
+        server_id = server_conf.get('id')
+        if not server_id:
+            print(f"Warning: Skipping service in project '{project_name}' due to missing required field 'id': {server_conf}")
+            continue
 
-    service_name = f"mcp-{server_id}"
-    port_mapping = f"${{{port_var}:-{default_port_value}}}:${{{DEFAULT_MCP_CONTAINER_PORT_VAR}}}"
+        # --- Apply Defaults ---
+        entity_type_dir = server_conf.get('entity_dir')
+        if not entity_type_dir:
+            print(f"Warning: Skipping service '{server_id}' in project '{project_name}' due to missing required field 'entity_dir'.")
+            continue
+        
+        project_root_dir = project_data.get('root_dir')
+        if not project_root_dir:
+            print(f"Warning: Skipping service '{server_id}' in project '{project_name}' due to missing project root_dir.")
+            continue
+        
+        # --- End Defaults ---
 
-    # Use CommentedMap for the service definition to allow adding merge key
-    new_service = CommentedMap()
-    new_service['container_name'] = f"${{{container_name_var}}}"
-    new_service['ports'] = [port_mapping] # List of ports
+        service_name = f"mcp-{server_id}"
+        
+        # Get container name from config or use default
+        container_name = server_conf.get('container_name')
+        if container_name is None:
+            container_name = f"mcp-{server_id}"
+        
+        # Get port from config or use default
+        port_default = server_conf.get('port_default')
+        if port_default is None:
+            port_default = DEFAULT_PORT_START + overall_service_index + 1
+        port_mapping = f"{port_default}:${{{DEFAULT_MCP_CONTAINER_PORT_VAR}}}"
 
-    # Create environment map
-    env_vars = CommentedMap()
-    env_vars['MCP_GROUP_ID'] = mcp_group_id
-    env_vars['MCP_USE_CUSTOM_ENTITIES'] = "true" # Env vars are strings
+        # Use CommentedMap for the service definition to allow adding merge key
+        new_service = CommentedMap()
+        new_service['container_name'] = container_name
+        new_service['ports'] = [port_mapping] # List of ports
 
-    if entity_type_dir is not None:
-        env_vars['MCP_ENTITY_TYPE_DIR'] = entity_type_dir
-    if entity_types is not None:
-        # Handle multi-line strings correctly if needed
-        if '\n' in entity_types:
-             env_vars['MCP_ENTITY_TYPES'] = LiteralScalarString(entity_types)
-        else:
-             env_vars['MCP_ENTITY_TYPES'] = entity_types
+        # Create environment map
+        env_vars = CommentedMap()
+        mcp_group_id = server_conf.get('group_id', server_id)
+        env_vars['MCP_GROUP_ID'] = mcp_group_id
+        env_vars['MCP_USE_CUSTOM_ENTITIES'] = "true" # Env vars are strings
+        
+        # Calculate absolute path for entity directory
+        abs_host_entity_path = os.path.abspath(os.path.join(project_root_dir, entity_type_dir))
+        
+        # Define container entity path constant
+        CONTAINER_ENTITY_PATH = "/app/project_entities"
+        
+        # Add volume mount for entity directory
+        new_service.setdefault('volumes', []).append(f"{abs_host_entity_path}:{CONTAINER_ENTITY_PATH}:ro")
+        
+        # Set MCP_ENTITY_TYPE_DIR to container path
+        env_vars['MCP_ENTITY_TYPE_DIR'] = CONTAINER_ENTITY_PATH
+        
+        # Add any project-specific environment variables
+        project_environment = server_conf.get('environment', {})
+        env_vars.update(project_environment)
 
-    new_service['environment'] = env_vars
+        new_service['environment'] = env_vars
 
-    # IMPORTANT: Add the merge key using ruamel.yaml's merge feature
-    # We provide the Python object that was defined with the anchor.
-    # The list [(0, custom_base_anchor_obj)] means insert merge at index 0
-    new_service.add_yaml_merge([(0, custom_base_anchor_obj)])
+        # IMPORTANT: Add the merge key using ruamel.yaml's merge feature
+        # We provide the Python object that was defined with the anchor.
+        # The list [(0, custom_base_anchor_obj)] means insert merge at index 0
+        new_service.add_yaml_merge([(0, custom_base_anchor_obj)])
 
-    # Add the fully constructed service definition to the services map
-    services_map[service_name] = new_service
+        # Add the fully constructed service definition to the services map
+        services_map[service_name] = new_service
+        
+        # Increment the overall service index
+        overall_service_index += 1
 
 
 # --- Write the final combined docker-compose.yml ---
@@ -138,12 +183,11 @@ try:
         # Add header comment
         header = [
             "# Generated by generate_compose.py",
-            "# Do not edit this file directly. Modify base-compose.yaml or custom_servers.yaml instead.",
+            "# Do not edit this file directly. Modify base-compose.yaml or project-specific mcp-config.yaml files instead.",
             "",
             "# --- Custom MCP Services Info ---",
             "# Default Ports: Assigned sequentially starting from 8001 (8000 + index + 1)",
-            "#              Can be overridden by setting the corresponding <ID>_PORT env var",
-            "#              or by specifying a different `port` variable in custom_servers.yaml.",
+            "#              Can be overridden by specifying 'port_default' in project's mcp-config.yaml.",
             "\n" # Add extra newline before YAML content
         ]
         f.write("\n".join(header))
