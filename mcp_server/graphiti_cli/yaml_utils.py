@@ -11,19 +11,35 @@ from ruamel.yaml.comments import CommentedMap
 import os
 from typing import Optional, List, Dict, Any
 
-from .core import get_mcp_server_dir, CONTAINER_ENTITY_PATH, DEFAULT_PORT_START, DEFAULT_MCP_CONTAINER_PORT_VAR, RED, GREEN, YELLOW, CYAN, NC
-from .core import LogLevel, DIR_AI, DIR_GRAPH, DIR_ENTITIES
+from .core import get_mcp_server_dir
+from constants import (
+    # Colors for output
+    RED, GREEN, YELLOW, CYAN, NC,
+    # Docker/container constants
+    CONTAINER_ENTITY_PATH, DEFAULT_PORT_START, DEFAULT_MCP_CONTAINER_PORT_VAR,
+    # Directory structure
+    DIR_AI, DIR_GRAPH, DIR_ENTITIES, 
+    # Environment variables
+    ENV_MCP_GROUP_ID, ENV_MCP_USE_CUSTOM_ENTITIES, ENV_MCP_USE_CUSTOM_ENTITIES_VALUE, ENV_MCP_ENTITY_TYPE_DIR,
+    # File and path constants
+    BASE_COMPOSE_FILENAME, PROJECTS_REGISTRY_FILENAME, DOCKER_COMPOSE_OUTPUT_FILENAME,
+    # Project container path
+    PROJECT_CONTAINER_ENTITY_PATH,
+    # Registry file keys
+    REGISTRY_PROJECTS_KEY, REGISTRY_ROOT_DIR_KEY, REGISTRY_CONFIG_FILE_KEY, REGISTRY_ENABLED_KEY,
+    # Compose file keys
+    COMPOSE_SERVICES_KEY, COMPOSE_CUSTOM_BASE_ANCHOR_KEY, COMPOSE_CONTAINER_NAME_KEY,
+    COMPOSE_PORTS_KEY, COMPOSE_ENVIRONMENT_KEY, COMPOSE_VOLUMES_KEY,
+    # Project config keys
+    PROJECT_SERVICES_KEY, PROJECT_SERVER_ID_KEY, PROJECT_ENTITY_DIR_KEY, 
+    PROJECT_CONTAINER_NAME_KEY, PROJECT_PORT_DEFAULT_KEY, PROJECT_GROUP_ID_KEY, PROJECT_ENVIRONMENT_KEY,
+    # Service name constants
+    SERVICE_NAME_PREFIX
+)
+from .core import LogLevel
 
-# --- Directory Structure Constants ---
+# --- Project AI Graph Dirs ---
 PROJECT_AI_GRAPH_DIRS = [DIR_AI, DIR_GRAPH]  # Standard subdirectory path for project entities
-
-# Define the distinct path for project-specific entities inside the container
-PROJECT_CONTAINER_ENTITY_PATH = "/app/project_entities"
-
-# --- File and Path Constants ---
-BASE_COMPOSE_FILENAME = "base-compose.yaml"
-PROJECTS_REGISTRY_FILENAME = "mcp-projects.yaml"
-DOCKER_COMPOSE_OUTPUT_FILENAME = "docker-compose.yml"
 
 # --- Registry File Header Constants ---
 REGISTRY_HEADER_LINES = [
@@ -41,39 +57,6 @@ DOCKER_COMPOSE_HEADER_LINES = [
     "",
     "# --- Custom MCP Services Info ---"
 ]
-
-# --- YAML Key Constants ---
-# Registry file keys
-REGISTRY_PROJECTS_KEY = "projects"
-REGISTRY_ROOT_DIR_KEY = "root_dir"
-REGISTRY_CONFIG_FILE_KEY = "config_file"
-REGISTRY_ENABLED_KEY = "enabled"
-
-# Compose file keys
-COMPOSE_SERVICES_KEY = "services"
-COMPOSE_CUSTOM_BASE_ANCHOR_KEY = "x-graphiti-mcp-custom-base"
-COMPOSE_CONTAINER_NAME_KEY = "container_name"
-COMPOSE_PORTS_KEY = "ports"
-COMPOSE_ENVIRONMENT_KEY = "environment"
-COMPOSE_VOLUMES_KEY = "volumes"
-
-# Project config keys
-PROJECT_SERVICES_KEY = "services"
-PROJECT_SERVER_ID_KEY = "id"
-PROJECT_ENTITY_DIR_KEY = "entity_dir"
-PROJECT_CONTAINER_NAME_KEY = "container_name"
-PROJECT_PORT_DEFAULT_KEY = "port_default"
-PROJECT_GROUP_ID_KEY = "group_id"
-PROJECT_ENVIRONMENT_KEY = "environment"
-
-# --- Environment Variable Constants ---
-ENV_MCP_GROUP_ID = "MCP_GROUP_ID"
-ENV_MCP_USE_CUSTOM_ENTITIES = "MCP_USE_CUSTOM_ENTITIES"
-ENV_MCP_USE_CUSTOM_ENTITIES_VALUE = "true"
-ENV_MCP_ENTITY_TYPE_DIR = "MCP_ENTITY_TYPE_DIR"
-
-# --- Other Constants ---
-SERVICE_NAME_PREFIX = "mcp-"
 
 # --- YAML Instances ---
 yaml_rt = YAML()  # Round-Trip for preserving structure/comments

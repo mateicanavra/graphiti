@@ -11,36 +11,23 @@ from enum import Enum
 import shutil
 from typing import List, Optional, Union, Dict, Any
 
-# --- ANSI Color Constants ---
-# These match the original bash script for consistency
-RED = '\033[0;31m'
-GREEN = '\033[0;32m'
-YELLOW = '\033[0;33m'
-BLUE = '\033[0;34m'
-CYAN = '\033[0;36m'
-BOLD = '\033[1m'
-NC = '\033[0m'  # No Color
-
-# --- Constants ---
-DEFAULT_PORT_START = 8000
-DEFAULT_MCP_CONTAINER_PORT_VAR = "MCP_PORT"
-CONTAINER_ENTITY_PATH = "/app/entity_types"
-ENV_REPO_PATH = "MCP_GRAPHITI_REPO_PATH"
-
-# --- Directory and File Constants ---
-DIR_MCP_SERVER = "mcp_server"
-DIR_ENTITY_TYPES = "entity_types"
-DIR_AI = "ai"
-DIR_GRAPH = "graph"
-DIR_ENTITIES = "entities"
-DIR_DIST = "dist"
-FILE_PYPROJECT_TOML = "pyproject.toml"
-FILE_GIT_KEEP = ".gitkeep"
-REGEX_VALID_NAME = r'^[a-zA-Z0-9_-]+$'
-
-# --- Package Constants ---
-PACKAGE_LOCAL_WHEEL_MARKER = "graphiti-core @ file:///dist/"
-PACKAGE_PUBLISHED_PREFIX = "graphiti-core>="
+# Import shared constants from central constants module
+from constants import (
+    # ANSI colors
+    RED, GREEN, YELLOW, BLUE, CYAN, BOLD, NC,
+    # Directory structure
+    DIR_MCP_SERVER, DIR_ENTITY_TYPES, DIR_AI, DIR_GRAPH, DIR_ENTITIES, DIR_DIST,
+    # Files
+    FILE_PYPROJECT_TOML, FILE_GIT_KEEP,
+    # Validation
+    REGEX_VALID_NAME,
+    # Docker/container defaults
+    DEFAULT_PORT_START, DEFAULT_MCP_CONTAINER_PORT_VAR, CONTAINER_ENTITY_PATH,
+    # Environment variables
+    ENV_REPO_PATH,
+    # Package constants
+    PACKAGE_LOCAL_WHEEL_MARKER, PACKAGE_PUBLISHED_PREFIX
+)
 
 # --- Enums ---
 class LogLevel(str, Enum):

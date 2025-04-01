@@ -127,6 +127,7 @@ services:
       MCP_GROUP_ID: magic-candidates
       MCP_USE_CUSTOM_ENTITIES: 'true'
       MCP_ENTITY_TYPE_DIR: /app/project_entities
+      GRAPHITI_LOG_LEVEL: debug
     container_name: mcp-magic-candidates-main
     ports:
       - 8003:${MCP_PORT}

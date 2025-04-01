@@ -33,11 +33,9 @@ from graphiti_core.search.search_config_recipes import (
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
 from entity_types import get_entity_types, get_entity_type_subset, register_entity_type
+from constants import DEFAULT_LOG_LEVEL, DEFAULT_LLM_MODEL, ENV_GRAPHITI_LOG_LEVEL
 
 load_dotenv()
-
-DEFAULT_LLM_MODEL = 'gpt-4o'
-DEFAULT_LOG_LEVEL = logging.INFO
 
 # The ENTITY_TYPES dictionary is managed by the registry in mcp_server.entity_types
 # NOTE: This global reference is only used for predefined entity subsets below.
@@ -129,7 +127,7 @@ class MCPConfig(BaseModel):
 
 
 # Configure logging
-log_level_str = os.environ.get('GRAPHITI_LOG_LEVEL', 'info').upper()
+log_level_str = os.environ.get(ENV_GRAPHITI_LOG_LEVEL, 'info').upper()
 log_level = getattr(logging, log_level_str, DEFAULT_LOG_LEVEL)
 
 logging.basicConfig(

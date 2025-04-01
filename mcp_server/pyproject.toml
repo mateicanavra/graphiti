@@ -25,5 +25,9 @@ build-backend = "setuptools.build_meta"
 
 # Explicitly specify packages to include
 [tool.setuptools.packages.find]
-include = ["graphiti_cli*"]
-exclude = ["entity_types*", "rules*", "llm_cache*"]
+where = ["."]  # Look in the current directory (mcp_server)
+include = ["graphiti_cli"]  # Only include the CLI package
+
+# Add py_modules to include individual Python files (like constants.py)
+[tool.setuptools]
+py-modules = ["constants"]

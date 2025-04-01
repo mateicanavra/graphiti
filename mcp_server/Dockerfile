@@ -1,54 +1,76 @@
-FROM python:3.11-slim
+FROM --platform=$BUILDPLATFORM python:3.11-slim AS base
 
+# Set environment variables to prevent buffering issues with logs
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Set the working directory in the container
 WORKDIR /app
 
-# Install uv for package management
-RUN apt-get update && apt-get install -y curl && \
-    curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# Install curl, install uv, add its dir to the current PATH, and verify in one step
+RUN apt-get update && apt-get install -y curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    # Install uv using the recommended installer script
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    # Add uv's ACTUAL installation directory to the PATH for this RUN command's shell
+    && export PATH="/root/.local/bin:${PATH}" \
+    # Verify uv installation within the same RUN command
+    && uv --version
 
-# Add uv to PATH
+# Add uv's ACTUAL installation directory to the ENV PATH for subsequent stages and the final image
 ENV PATH="/root/.local/bin:${PATH}"
 
-# Create dist directory first
+# --- Build Stage ---
+# Use a build stage to install dependencies
+# This helps leverage Docker layer caching
+FROM base AS builder
+
+# Create dist directory for local wheel installation if needed
 RUN mkdir -p /dist/
 
-# Copy the dist directory with our local wheel to container root (if it exists)
+# Copy the dist directory contents (containing local wheels)
+# This step allows installing local packages like graphiti-core
+# Ensure 'dist' exists in your project root and contains necessary wheels before building
 COPY dist/* /dist/
 
-# Copy pyproject.toml and install dependencies
-COPY pyproject.toml .
-RUN uv sync
-# RUN chmod +x $(which uv)
+# Copy project configuration
+COPY pyproject.toml uv.lock* ./
 
-# Copy necessary application code and directories into /app/
-# The destination must end with '/' when copying directories
+# Install dependencies using uv sync (faster than pip install)
+# This installs dependencies specified in pyproject.toml based on uv.lock
+# Add --system to allow installation into the container's Python environment
+RUN uv pip sync uv.lock --system
+
+# If you want to install the project itself (mcp-server), uncomment the line below
+# This makes 'constants.py', 'graphiti_mcp_server.py', etc., available as installed modules
+# RUN uv pip install . --no-deps --system
+
+
+# --- Final Stage ---
+# Start from the base image again for a cleaner final image
+FROM base
+
+# Copy installed dependencies from the builder stage
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+# Also copy binaries installed by dependencies (like uv itself if installed via pip in builder)
+COPY --from=builder /root/.local/bin /root/.local/bin
+
+# Copy application code
 COPY graphiti_mcp_server.py ./
+COPY constants.py ./
 COPY entity_types/ ./entity_types/
-
-# --- Add Entrypoint Script ---
-# Copy the entrypoint script into the working directory
 COPY entrypoint.sh .
-# Make it executable
+
+# Make entrypoint script executable
 RUN chmod +x ./entrypoint.sh
-# ---------------------------
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
+# Expose the default MCP port (adjust if needed)
+EXPOSE 8000
 
-# # Create a non-root user and group
-# RUN groupadd --system appuser && useradd --system --gid appuser appuser
-
-# # Change ownership of the app directory to the new user
-# # Ensure entrypoint.sh is also owned correctly
-# RUN chown -R appuser:appuser /app
-
-# # Switch to the non-root user
-# USER appuser
-
-# --- Set Entrypoint ---
-# Use the script as the main container command
+# Set the entrypoint script to run when the container starts
 ENTRYPOINT ["./entrypoint.sh"]
 
-# Original CMD instruction has been replaced by the ENTRYPOINT above
-# CMD ["uv", "run", "graphiti_mcp_server.py"]
+# Default command can be overridden (e.g., to specify group_id)
+# Example: docker run <image> --group-id my_project
+CMD ["--transport", "sse"]

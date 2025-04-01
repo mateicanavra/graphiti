@@ -11,7 +11,29 @@ import re  # For entity name validation
 
 from . import core
 from . import yaml_utils
-from .core import DIR_AI, DIR_GRAPH, DIR_ENTITIES, FILE_GIT_KEEP, REGEX_VALID_NAME
+from constants import (
+    # Configuration constants
+    CONFIG_FILENAME, ENTITY_FILE_EXTENSION,
+    CONFIG_KEY_SERVICES, CONFIG_KEY_ID, CONFIG_KEY_CONTAINER_NAME, 
+    CONFIG_KEY_PORT_DEFAULT, CONFIG_KEY_GROUP_ID, CONFIG_KEY_ENTITY_DIR,
+    CONFIG_KEY_ENVIRONMENT,
+    # Default values
+    DEFAULT_CUSTOM_CONTAINER_NAME, DEFAULT_CUSTOM_PORT, DEFAULT_ENTITY_DIR_NAME,
+    # Environment variables
+    ENV_GRAPHITI_LOG_LEVEL,
+    # Logging
+    DEFAULT_LOG_LEVEL_STR,
+    # Entity template constants (these should remain local as they're specific to this module)
+    DIR_AI, DIR_GRAPH, DIR_ENTITIES, FILE_GIT_KEEP, REGEX_VALID_NAME
+)
+
+# --- Entity Template Constants ---
+ENTITY_CLASS_PATTERN = "class Product(BaseModel):"
+ENTITY_DESC_PATTERN_PRODUCT = "A Product represents"
+ENTITY_DESC_PATTERN_ABOUT_PRODUCTS = "about Products mentioned"
+ENTITY_DESC_PATTERN_PRODUCT_NAMES = "product names"
+ENTITY_DESC_PATTERN_PRODUCT_BELONGS = "the product belongs"
+ENTITY_DESC_PATTERN_PRODUCT_DESC = "description of the product"
 
 # --- Docker Commands ---
 
@@ -110,16 +132,16 @@ def init_project(project_name: str, target_dir: Path):
         sys.exit(1)
 
     # Create mcp-config.yaml in ai/graph directory
-    config_path = graph_dir / "mcp-config.yaml"
+    config_path = graph_dir / CONFIG_FILENAME
     config_content = f"""# Configuration for project: {project_name}
-services:
-  - id: {project_name}-main  # Service ID (used for default naming)
-    # container_name: "custom-name"  # Optional: Specify custom container name
-    # port_default: 8001             # Optional: Specify custom host port
-    group_id: "{project_name}"       # Graph group ID
-    entity_dir: "entities"           # Relative path to entity definitions within ai/graph
-    # environment:                   # Optional: Add non-secret env vars here
-    #   MY_FLAG: "true"
+{CONFIG_KEY_SERVICES}:
+  - {CONFIG_KEY_ID}: {project_name}-main  # Service ID (used for default naming)
+    # {CONFIG_KEY_CONTAINER_NAME}: "{DEFAULT_CUSTOM_CONTAINER_NAME}"  # Optional: Specify custom container name
+    # {CONFIG_KEY_PORT_DEFAULT}: {DEFAULT_CUSTOM_PORT}             # Optional: Specify custom host port
+    {CONFIG_KEY_GROUP_ID}: "{project_name}"       # Graph group ID
+    {CONFIG_KEY_ENTITY_DIR}: "{DEFAULT_ENTITY_DIR_NAME}"           # Relative path to entity definitions within ai/graph
+    {CONFIG_KEY_ENVIRONMENT}:                     # Optional: Add non-secret env vars here
+      {ENV_GRAPHITI_LOG_LEVEL}: "{DEFAULT_LOG_LEVEL_STR}"
 """
     try:
         config_path.write_text(config_content)
@@ -284,7 +306,7 @@ def create_entity_set(entity_name: str, target_dir: Path):
         
     # Load project configuration from ai/graph directory
     graph_dir = target_dir / DIR_AI / DIR_GRAPH
-    config_path = graph_dir / "mcp-config.yaml"
+    config_path = graph_dir / CONFIG_FILENAME
     if not config_path.is_file():
         print(f"{core.RED}Error: Project configuration file not found: {config_path}{core.NC}")
         print(f"Make sure the project has been initialized with 'graphiti init' first.")
@@ -296,23 +318,23 @@ def create_entity_set(entity_name: str, target_dir: Path):
         sys.exit(1)
         
     # Validate project config structure
-    if 'services' not in project_config or not isinstance(project_config['services'], list) or not project_config['services']:
-        print(f"{core.RED}Error: Invalid or missing 'services' section in project configuration: {config_path}{core.NC}")
+    if CONFIG_KEY_SERVICES not in project_config or not isinstance(project_config[CONFIG_KEY_SERVICES], list) or not project_config[CONFIG_KEY_SERVICES]:
+        print(f"{core.RED}Error: Invalid or missing '{CONFIG_KEY_SERVICES}' section in project configuration: {config_path}{core.NC}")
         sys.exit(1)
         
     # Extract the entity directory name from the first service entry
-    entity_dir_name = project_config.get('services', [{}])[0].get('entity_dir', 'entities')
+    entity_dir_name = project_config.get(CONFIG_KEY_SERVICES, [{}])[0].get(CONFIG_KEY_ENTITY_DIR, DEFAULT_ENTITY_DIR_NAME)
     
     # Calculate paths - entities directory directly in graph_dir
     project_entity_dir = graph_dir / entity_dir_name
     
     # Generate file name with the entity class name (without Entity suffix)
     class_name = _to_pascal_case(entity_name)
-    entity_file_path = project_entity_dir / f"{class_name}.py"  # Name file after class
+    entity_file_path = project_entity_dir / f"{class_name}{ENTITY_FILE_EXTENSION}"  # Name file after class
     
     # Check if the entity file already exists
     if entity_file_path.exists():
-        print(f"{core.RED}Error: Entity file '{class_name}.py' already exists at: {entity_file_path}{core.NC}")
+        print(f"{core.RED}Error: Entity file '{class_name}{ENTITY_FILE_EXTENSION}' already exists at: {entity_file_path}{core.NC}")
         sys.exit(1)
         
     # Get path to template file from mcp_server
@@ -340,13 +362,13 @@ class {class_name}(BaseModel):
         else:
             template_content = example_template_path.read_text()
             # Perform replacements carefully
-            content = template_content.replace("class Product(BaseModel):", f"class {class_name}(BaseModel):")
+            content = template_content.replace(ENTITY_CLASS_PATTERN, f"class {class_name}(BaseModel):")
             # Replace descriptions, trying to be specific
-            content = content.replace("A Product represents", f"A {class_name} represents")
-            content = content.replace("about Products mentioned", f"about {class_name} entities mentioned")
-            content = content.replace("product names", f"{entity_name} names")
-            content = content.replace("the product belongs", f"the {entity_name} belongs")
-            content = content.replace("description of the product", f"description of the {entity_name}")
+            content = content.replace(ENTITY_DESC_PATTERN_PRODUCT, f"A {class_name} represents")
+            content = content.replace(ENTITY_DESC_PATTERN_ABOUT_PRODUCTS, f"about {class_name} entities mentioned")
+            content = content.replace(ENTITY_DESC_PATTERN_PRODUCT_NAMES, f"{entity_name} names")
+            content = content.replace(ENTITY_DESC_PATTERN_PRODUCT_BELONGS, f"the {entity_name} belongs")
+            content = content.replace(ENTITY_DESC_PATTERN_PRODUCT_DESC, f"description of the {entity_name}")
             # Add more replacements if needed based on the template content
 
             entity_file_path.write_text(content)
