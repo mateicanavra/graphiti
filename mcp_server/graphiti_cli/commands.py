@@ -11,6 +11,7 @@ import re  # For entity name validation
 
 from . import core
 from . import yaml_utils
+from .core import DIR_AI, DIR_GRAPH, DIR_ENTITIES, FILE_GIT_KEEP, REGEX_VALID_NAME
 
 # --- Docker Commands ---
 
@@ -48,8 +49,9 @@ def docker_restart(detached: bool, log_level: str):
         log_level (str): Log level to use
     """
     print(f"{core.BOLD}Restarting Graphiti containers: first down, then up...{core.NC}")
-    docker_down(log_level)  # Run down first
-    docker_up(detached, log_level)  # Then run up
+    core.ensure_docker_compose_file()  # Ensure docker-compose.yml exists before the restart sequence
+    core.run_docker_compose(["down"], log_level)
+    docker_up(detached, log_level)
     print(f"{core.GREEN}Restart sequence completed.{core.NC}")
 
 def docker_reload(service_name: str):
@@ -62,11 +64,9 @@ def docker_reload(service_name: str):
     core.ensure_docker_compose_file()
     print(f"{core.BOLD}Attempting to restart service '{core.CYAN}{service_name}{core.NC}'...{core.NC}")
     try:
-        # Use check=True to let run_command handle the error printing on failure
-        core.run_docker_compose(["restart", service_name], check=True)
+        core.run_docker_compose(["restart", service_name], log_level=core.LogLevel.info.value)
         print(f"{core.GREEN}Service '{service_name}' restarted successfully.{core.NC}")
     except Exception:
-        # Error message already printed by run_command via CalledProcessError handling
         print(f"{core.RED}Failed to restart service '{service_name}'. Check service name and if stack is running.{core.NC}")
         sys.exit(1)
 
@@ -77,7 +77,7 @@ def docker_compose_generate():
     print(f"{core.BOLD}Generating docker-compose.yml from templates...{core.NC}")
     mcp_server_dir = core.get_mcp_server_dir()
     try:
-        yaml_utils.generate_compose_logic(mcp_server_dir)
+        yaml_utils.generate_compose_logic(mcp_server_dir)  # Generate with default level
         # Success message printed within generate_compose_logic
     except Exception as e:
         print(f"{core.RED}Error: Failed to generate docker-compose.yml file: {e}{core.NC}")
@@ -94,14 +94,14 @@ def init_project(project_name: str, target_dir: Path):
         target_dir (Path): Target directory for the project
     """
     # Basic validation
-    if not re.fullmatch(r'^[a-zA-Z0-9_-]+$', project_name):
+    if not re.fullmatch(REGEX_VALID_NAME, project_name):
         print(f"{core.RED}Error: Invalid PROJECT_NAME '{project_name}'. Use only letters, numbers, underscores, and hyphens.{core.NC}")
         sys.exit(1)
 
     print(f"Initializing Graphiti project '{core.CYAN}{project_name}{core.NC}' in '{core.CYAN}{target_dir}{core.NC}'...")
 
     # Create ai/graph directory structure
-    graph_dir = target_dir / "ai" / "graph"
+    graph_dir = target_dir / DIR_AI / DIR_GRAPH
     try:
         graph_dir.mkdir(parents=True, exist_ok=True)
         print(f"Created directory structure: {core.CYAN}{graph_dir}{core.NC}")
@@ -129,10 +129,10 @@ services:
         sys.exit(1)
 
     # Create entities directory within ai/graph
-    entities_dir = graph_dir / "entities"
+    entities_dir = graph_dir / DIR_ENTITIES
     try:
         entities_dir.mkdir(exist_ok=True)
-        (entities_dir / ".gitkeep").touch(exist_ok=True)  # Create or update timestamp
+        (entities_dir / FILE_GIT_KEEP).touch(exist_ok=True)  # Create or update timestamp
         print(f"Created entities directory: {core.CYAN}{entities_dir}{core.NC}")
     except OSError as e:
         print(f"{core.RED}Error creating entities directory {entities_dir}: {e}{core.NC}")
@@ -278,12 +278,12 @@ def create_entity_set(entity_name: str, target_dir: Path):
         target_dir (Path): Target project root directory
     """
     # Validate entity_name format
-    if not re.fullmatch(r'^[a-zA-Z0-9_-]+$', entity_name):
+    if not re.fullmatch(REGEX_VALID_NAME, entity_name):
         print(f"{core.RED}Error: Invalid entity name '{entity_name}'. Use only letters, numbers, underscores, and hyphens.{core.NC}")
         sys.exit(1)
         
     # Load project configuration from ai/graph directory
-    graph_dir = target_dir / "ai" / "graph"
+    graph_dir = target_dir / DIR_AI / DIR_GRAPH
     config_path = graph_dir / "mcp-config.yaml"
     if not config_path.is_file():
         print(f"{core.RED}Error: Project configuration file not found: {config_path}{core.NC}")

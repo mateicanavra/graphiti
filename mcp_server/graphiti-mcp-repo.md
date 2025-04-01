@@ -36,6 +36,10 @@ The content is organized as follows:
 
 # Directory Structure
 ```
+.ai/
+  plans/
+    refactor-cli-architecture.md
+    refactor-cli-plan.md
 entity_types/
   base/
     preferences.py
@@ -59,6 +63,18 @@ entity_types/
     TemporalModel.py
   __init__.py
   entity_registry.py
+graphiti_cli/
+  commands.py
+  core.py
+  main.py
+  yaml_utils.py
+mcp_server.egg-info/
+  dependency_links.txt
+  entry_points.txt
+  PKG-INFO
+  requires.txt
+  SOURCES.txt
+  top_level.txt
 rules/
   examples/
     graphiti-example-schema.md
@@ -66,9 +82,6 @@ rules/
     project_schema_template.md
   graphiti-knowledge-graph-maintenance.md
   graphiti-mcp-core-rules.md
-scripts/
-  _yaml_helper.py
-  graphiti
 .env.example
 .python-version
 .repomixignore
@@ -77,7 +90,6 @@ custom_servers.yaml
 docker-compose.yml
 Dockerfile
 entrypoint.sh
-generate_compose.py
 graphiti_mcp_server.py
 mcp_config_sse_example.json
 mcp_config_stdio_example.json
@@ -88,8 +100,984 @@ repomix.config.json
 
 # Files
 
+## File: .ai/plans/refactor-cli-architecture.md
+````markdown
+Okay, let's refine the architecture proposal for migrating the `graphiti` Bash script to Python, integrating existing Python helpers (`_yaml_helper.py`, `generate_compose.py`), and ensuring it aligns well with your current setup.
+
+We'll aim for a clean, maintainable Python CLI tool using **Typer** for the interface, **ruamel.yaml** for config file handling (as already established), and standard Python libraries (`subprocess`, `pathlib`, `os`, `shutil`) for orchestration.
+
+**Consolidation Strategy:**
+
+1.  **Integrate YAML Logic:** The core logic from `generate_compose.py` (@LINE:1-191) and `_yaml_helper.py` (@LINE:1-111) will be moved into functions within a dedicated `yaml_utils.py` module as part of the new CLI tool package. This eliminates executing them as separate scripts.
+2.  **Retain Server Logic:** `graphiti_mcp_server.py` (@LINE:1-780) remains the server application. Its `argparse` logic handles arguments passed _inside_ the container (via `entrypoint.sh`). The new Python CLI tool will _not_ replicate this internal server argument parsing; it focuses on orchestrating Docker and project setup from the host.
+3.  **Entity Registry:** `entity_registry.py` (@LINE:1-41) remains part of the server's domain, used during entity loading within the server runtime. The CLI tool doesn't interact with it directly.
+
+**Proposed Python CLI Architecture:**
+
+1.  **New Package Structure (Example):**
+    We'll create a dedicated package for the CLI tool. This could live at the repository root or within the existing `scripts/` directory. Let's assume we create `graphiti_cli/` at the root for clarity.
+
+    ```
+    mcp-graphiti/
+    ├── mcp_server/
+    │   ├── entity_types/
+    │   ├── rules/
+    │   ├── Dockerfile
+    │   ├── entrypoint.sh
+    │   ├── base-compose.yaml
+    │   ├── mcp-projects.yaml
+    │   ├── docker-compose.yml  # (Generated)
+    │   ├── graphiti_mcp_server.py
+    │   ├── entity_registry.py
+    │   └── ... (other server files)
+    ├── graphiti_cli/           # <--- NEW CLI Package
+    │   ├── __init__.py
+    │   ├── main.py             # Typer app definition, command entry points
+    │   ├── core.py             # Core logic: finding paths, running subprocesses
+    │   ├── commands.py         # Command implementations (init, up, down, etc.)
+    │   └── yaml_utils.py       # Integrated YAML handling logic
+    ├── pyproject.toml          # <--- Modified
+    ├── .env.example
+    └── ... (other repo files)
+    ```
+
+2.  **`pyproject.toml` Modifications:**
+    Update your main `pyproject.toml` (@LINE:1-16) (or create one at the root if it doesn't exist there) to include the CLI tool dependencies and define the script entry point.
+
+    ```toml
+    # pyproject.toml
+
+    [build-system]
+    requires = ["setuptools>=61.0"]
+    build-backend = "setuptools.build_meta"
+
+    [project]
+    name = "graphiti-mcp-tools" # Name for the installable package containing the CLI
+    version = "0.1.0" # Consider syncing with server version or managing independently
+    description = "CLI Tools for Graphiti MCP Server Management"
+    readme = "README.md"
+    requires-python = ">=3.10"
+    dependencies = [
+        # CLI specific dependencies:
+        "typer[all]>=0.9.0", # [all] includes rich for better tracebacks/output
+        "ruamel.yaml>=0.17.21",
+        "python-dotenv>=1.0.0", # Useful for potentially reading .env in CLI too
+        # Add other CLI-specific needs here
+    ]
+    # Note: Dependencies for the *server* itself (mcp, openai, graphiti-core)
+    # might be listed here if you install both server and CLI from the same
+    # pyproject.toml, or they could remain separate if the server has its own.
+    # For simplicity now, assuming they might be installed together.
+    # If separating, remove server deps from here.
+
+    [project.scripts]
+    # This makes the 'graphiti' command available after 'pip install .'
+    graphiti = "graphiti_cli.main:app"
+    ```
+
+    _(Self-correction: Added `build-system` section for modern packaging)_
+
+3.  **`graphiti_cli/main.py` (Entry Point & Typer App):**
+
+    ```python
+    # graphiti_cli/main.py
+    import typer
+    from pathlib import Path
+    from typing_extensions import Annotated # Preferred for Typer >= 0.9
+
+    # Import command functions and core utilities
+    from . import commands
+    from .core import LogLevel, get_repo_root
+
+    # Initialize Typer app
+    app = typer.Typer(
+        help="CLI for managing Graphiti MCP Server projects and Docker environment.",
+        no_args_is_help=True, # Show help if no command is given
+        rich_markup_mode="markdown" # Nicer help text formatting
+    )
+
+    # --- Callback to ensure repo path is found early ---
+    @app.callback()
+    def main_callback(ctx: typer.Context):
+        """
+        Main callback to perform setup before any command runs.
+        Ensures the MCP_GRAPHITI_REPO_PATH is found.
+        """
+        # Ensure repo root is detected/set early.
+        # get_repo_root() will print messages and exit if not found.
+        _ = get_repo_root()
+
+
+    # --- Define Commands (delegating to functions in commands.py) ---
+
+    @app.command()
+    def init(
+        project_name: Annotated[str, typer.Argument(help="Name of the target project.")],
+        target_dir: Annotated[Path, typer.Argument(
+            ".", # Default to current directory
+            help="Target project root directory.",
+            exists=False, # Allow creating the directory
+            file_okay=False,
+            dir_okay=True,
+            writable=True,
+            resolve_path=True # Convert to absolute path
+        )] = Path(".")
+    ):
+        """
+        Initialize a project: create ai/graph structure with config, entities dir, and rules. ✨
+        """
+        commands.init_project(project_name, target_dir)
+
+    @app.command()
+    def entity(
+        set_name: Annotated[str, typer.Argument(help="Name for the new entity type set (e.g., 'my-entities').")],
+        target_dir: Annotated[Path, typer.Argument(
+            ".",
+            help="Target project root directory containing ai/graph/mcp-config.yaml.",
+            exists=True, # Must exist for entity creation
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True
+        )] = Path(".")
+    ):
+        """
+        Create a new entity type set directory and template file within a project's ai/graph/entities directory. 📄
+        """
+        commands.create_entity_set(set_name, target_dir)
+
+    @app.command()
+    def rules(
+        project_name: Annotated[str, typer.Argument(help="Name of the target project for rule setup.")],
+        target_dir: Annotated[Path, typer.Argument(
+            ".",
+            help="Target project root directory.",
+            exists=True, # Must exist for rules setup
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True
+        )] = Path(".")
+    ):
+        """
+        Setup/update Cursor rules symlinks and schema template for a project. 🔗
+        """
+        commands.setup_rules(project_name, target_dir)
+
+    @app.command()
+    def up(
+        detached: Annotated[bool, typer.Option("--detached", "-d", help="Run containers in detached mode.")] = False,
+        log_level: Annotated[LogLevel, typer.Option("--log-level", help="Set logging level for containers.", case_sensitive=False)] = LogLevel.info
+    ):
+        """
+        Start all containers using Docker Compose (builds first). 🚀
+        """
+        commands.docker_up(detached, log_level.value)
+
+    @app.command()
+    def down(
+        log_level: Annotated[LogLevel, typer.Option("--log-level", help="Set logging level for Docker Compose execution.", case_sensitive=False)] = LogLevel.info
+    ):
+        """
+        Stop and remove all containers using Docker Compose. 🛑
+        """
+        commands.docker_down(log_level.value)
+
+    @app.command()
+    def restart(
+        detached: Annotated[bool, typer.Option("--detached", "-d", help="Run 'up' in detached mode after 'down'.")] = False,
+        log_level: Annotated[LogLevel, typer.Option("--log-level", help="Set logging level for containers.", case_sensitive=False)] = LogLevel.info
+    ):
+        """
+        Restart all containers: runs 'down' then 'up'. 🔄
+        """
+        commands.docker_restart(detached, log_level.value)
+
+    @app.command()
+    def reload(
+        service_name: Annotated[str, typer.Argument(help="Name of the service to reload (e.g., 'mcp-test-project-1-main').")]
+    ):
+        """
+        Restart a specific running service container. ⚡
+        """
+        commands.docker_reload(service_name)
+
+    @app.command()
+    def compose():
+        """
+        Generate docker-compose.yml from base and project configs. ⚙️
+        """
+        commands.docker_compose_generate()
+
+
+    # Allow running the script directly for development/testing
+    if __name__ == "__main__":
+        app()
+    ```
+
+    _(Self-correction: Using `Annotated` for Typer arguments/options as it's the modern approach. Added `no_args_is_help=True`. Added emojis for fun.)_
+
+4.  **`graphiti_cli/core.py` (Core Utilities):**
+    (Similar to the previous proposal, containing `get_repo_root`, `get_mcp_server_dir`, `run_command`, `LogLevel` enum, ANSI colors, etc. No major changes needed here from the previous draft.)
+
+5.  **`graphiti_cli/yaml_utils.py` (Consolidated YAML Logic):**
+
+    ```python
+    # graphiti_cli/yaml_utils.py
+    import sys
+    from pathlib import Path
+    from ruamel.yaml import YAML
+    from ruamel.yaml.comments import CommentedMap
+    import os
+    from typing import Optional, List, Dict, Any
+
+    from .core import get_mcp_server_dir, CONTAINER_ENTITY_PATH, DEFAULT_PORT_START, DEFAULT_MCP_CONTAINER_PORT_VAR # Import constants
+
+    # --- YAML Instances ---
+    yaml_rt = YAML() # Round-Trip for preserving structure/comments
+    yaml_rt.preserve_quotes = True
+    yaml_rt.indent(mapping=2, sequence=4, offset=2)
+
+    yaml_safe = YAML(typ='safe') # Safe loader for reading untrusted/simple config
+
+    # --- File Handling ---
+    def load_yaml_file(file_path: Path, safe: bool = False) -> Optional[Any]:
+        """Loads a YAML file, handling errors."""
+        yaml_loader = yaml_safe if safe else yaml_rt
+        if not file_path.is_file():
+            print(f"Warning: YAML file not found or is not a file: {file_path}")
+            return None
+        try:
+            with file_path.open('r') as f:
+                return yaml_loader.load(f)
+        except Exception as e:
+            print(f"Error parsing YAML file '{file_path}': {e}")
+            return None # Or raise specific exception
+
+    def write_yaml_file(data: Any, file_path: Path, header: Optional[List[str]] = None):
+         """Writes data to a YAML file using round-trip dumper."""
+         try:
+             # Ensure parent directory exists
+             file_path.parent.mkdir(parents=True, exist_ok=True)
+             with file_path.open('w') as f:
+                 if header:
+                     f.write("\n".join(header) + "\n\n") # Add extra newline
+                 yaml_rt.dump(data, f)
+         except IOError as e:
+             print(f"Error writing YAML file '{file_path}': {e}")
+             raise # Re-raise after printing
+         except Exception as e:
+             print(f"An unexpected error occurred during YAML dumping to '{file_path}': {e}")
+             raise
+
+    # --- Logic from _yaml_helper.py ---
+    def update_registry_logic(
+        registry_file: Path,
+        project_name: str,
+        root_dir: Path, # Expecting resolved absolute path
+        config_file: Path, # Expecting resolved absolute path
+        enabled: bool = True
+    ) -> bool:
+        """
+        Updates the central project registry file (mcp-projects.yaml).
+        Corresponds to the logic in the old _yaml_helper.py.
+        """
+        print(f"Updating registry '{registry_file}' for project '{project_name}'")
+        if not root_dir.is_absolute() or not config_file.is_absolute():
+             print("Error: Project root_dir and config_file must be absolute paths.")
+             return False
+
+        if not config_file.exists():
+             print(f"Warning: Project config file '{config_file}' does not exist.")
+             # Allow continuing for init scenarios
+
+        # Create registry file with header if it doesn't exist
+        if not registry_file.exists():
+            print(f"Creating new registry file: {registry_file}")
+            header = [
+                "# !! WARNING: This file is managed by the 'graphiti init' command. !!",
+                "# !! Avoid manual edits unless absolutely necessary.                 !!",
+                "#",
+                "# Maps project names to their configuration details.",
+                "# Paths should be absolute for reliability.",
+            ]
+            initial_data = CommentedMap({'projects': CommentedMap()})
+            try:
+                write_yaml_file(initial_data, registry_file, header=header)
+            except Exception:
+                 return False # Error handled in write_yaml_file
+
+        # Load existing registry data using round-trip loader
+        data = load_yaml_file(registry_file, safe=False)
+        if data is None:
+             print(f"Error: Could not load registry file {registry_file}")
+             return False
+
+        if not isinstance(data, dict) or 'projects' not in data:
+            print(f"Error: Invalid registry file format in {registry_file}. Missing 'projects' key.")
+            return False
+
+        # Ensure 'projects' key exists and is a map
+        if data.get('projects') is None:
+             data['projects'] = CommentedMap()
+        elif not isinstance(data['projects'], dict):
+              print(f"Error: 'projects' key in {registry_file} is not a dictionary.")
+              return False
+
+
+        # Add or update the project entry (convert Paths to strings for YAML)
+        project_entry = CommentedMap({
+            'root_dir': str(root_dir),
+            'config_file': str(config_file),
+            'enabled': enabled
+        })
+        data['projects'][project_name] = project_entry
+
+        # Write back to the registry file
+        try:
+            # Preserve header by reading first few lines if necessary (complex)
+            # Simpler: Assume header is managed manually or re-added if file recreated.
+            # We rewrite the whole file here.
+            write_yaml_file(data, registry_file)
+            print(f"Successfully updated registry for project '{project_name}'")
+            return True
+        except Exception:
+             return False # Error handled in write_yaml_file
+
+
+    # --- Logic from generate_compose.py ---
+    def generate_compose_logic(mcp_server_dir: Path):
+        """
+        Generates the final docker-compose.yml by merging base and project configs.
+        Corresponds to the logic in the old generate_compose.py.
+        """
+        print("Generating docker-compose.yml...")
+        base_compose_path = mcp_server_dir / 'base-compose.yaml'
+        projects_registry_path = mcp_server_dir / 'mcp-projects.yaml'
+        output_compose_path = mcp_server_dir / 'docker-compose.yml'
+
+        # Load base compose file
+        compose_data = load_yaml_file(base_compose_path, safe=False)
+        if compose_data is None or not isinstance(compose_data, dict):
+            print(f"Error: Failed to load or parse base compose file: {base_compose_path}")
+            sys.exit(1)
+
+        if 'services' not in compose_data or not isinstance(compose_data.get('services'), dict):
+            print(f"Error: Invalid structure in '{base_compose_path}'. Missing 'services' dictionary.")
+            sys.exit(1)
+
+        # Load project registry safely
+        projects_registry = load_yaml_file(projects_registry_path, safe=True)
+        if projects_registry is None:
+            print(f"Warning: Project registry file '{projects_registry_path}' not found or failed to parse. No custom services will be added.")
+            projects_registry = {'projects': {}}
+        elif 'projects' not in projects_registry or not isinstance(projects_registry['projects'], dict):
+            print(f"Warning: Invalid format or missing 'projects' key in '{projects_registry_path}'. No custom services will be added.")
+            projects_registry = {'projects': {}}
+
+        # --- Generate Custom Service Definitions ---
+        services_map = compose_data['services'] # Should be CommentedMap
+
+        # Find the anchor object for merging
+        custom_base_anchor_obj = compose_data.get('x-graphiti-mcp-custom-base')
+        if not custom_base_anchor_obj:
+            print(f"{RED}Error: Could not find 'x-graphiti-mcp-custom-base' definition in {base_compose_path}.{NC}")
+            sys.exit(1)
+
+        overall_service_index = 0
+        # Iterate through projects from the registry
+        for project_name, project_data in projects_registry.get('projects', {}).items():
+            if not isinstance(project_data, dict) or not project_data.get('enabled', False):
+                continue # Skip disabled or invalid projects
+
+            project_config_path_str = project_data.get('config_file')
+            project_root_dir_str = project_data.get('root_dir')
+
+            if not project_config_path_str or not project_root_dir_str:
+                print(f"Warning: Skipping project '{project_name}' due to missing 'config_file' or 'root_dir'.")
+                continue
+
+            project_config_path = Path(project_config_path_str)
+            project_root_dir = Path(project_root_dir_str)
+
+            # Load the project's specific mcp-config.yaml
+            project_config = load_yaml_file(project_config_path, safe=True)
+            if project_config is None:
+                print(f"Warning: Skipping project '{project_name}' because config file '{project_config_path}' could not be loaded.")
+                continue
+
+            if 'services' not in project_config or not isinstance(project_config['services'], list):
+                print(f"Warning: Skipping project '{project_name}' due to missing or invalid 'services' list in '{project_config_path}'.")
+                continue
+
+            # Iterate through services defined in the project's config
+            for server_conf in project_config['services']:
+                if not isinstance(server_conf, dict):
+                    print(f"Warning: Skipping invalid service entry in '{project_config_path}': {server_conf}")
+                    continue
+
+                server_id = server_conf.get('id')
+                entity_type_dir = server_conf.get('entity_dir') # Relative path within project
+
+                if not server_id or not entity_type_dir:
+                    print(f"Warning: Skipping service in '{project_name}' due to missing 'id' or 'entity_dir': {server_conf}")
+                    continue
+
+                # --- Determine Service Configuration ---
+                service_name = f"mcp-{server_id}"
+                container_name = server_conf.get('container_name', service_name) # Default to service_name
+                port_default = server_conf.get('port_default', DEFAULT_PORT_START + overall_service_index + 1)
+                port_mapping = f"{port_default}:${{{DEFAULT_MCP_CONTAINER_PORT_VAR}}}" # Use f-string
+
+                # --- Build Service Definition using CommentedMap ---
+                new_service = CommentedMap()
+                # Add the merge key first using the anchor object
+                new_service.add_yaml_merge([(0, custom_base_anchor_obj)]) # Merge base config
+
+                new_service['container_name'] = container_name
+                new_service['ports'] = [port_mapping] # Ports must be a list
+
+                # --- Environment Variables ---
+                env_vars = CommentedMap() # Use CommentedMap to preserve order if needed
+                mcp_group_id = server_conf.get('group_id', project_name) # Default group_id to project_name
+                env_vars['MCP_GROUP_ID'] = mcp_group_id
+                env_vars['MCP_USE_CUSTOM_ENTITIES'] = 'true' # Assume true if defined here
+
+                # Calculate absolute host path for entity volume mount
+                abs_host_entity_path = (project_root_dir / entity_type_dir).resolve()
+                if not abs_host_entity_path.is_dir():
+                     print(f"Warning: Entity directory '{abs_host_entity_path}' for service '{service_name}' does not exist. Volume mount might fail.")
+                     # Continue anyway, Docker will create an empty dir inside container if host path doesn't exist
+
+                # Set container path for entity directory env var
+                env_vars['MCP_ENTITY_TYPE_DIR'] = CONTAINER_ENTITY_PATH
+
+                # Add project-specific environment variables from mcp-config.yaml
+                project_environment = server_conf.get('environment', {})
+                if isinstance(project_environment, dict):
+                     env_vars.update(project_environment)
+                else:
+                     print(f"Warning: Invalid 'environment' section for service '{service_name}' in '{project_config_path}'. Expected a dictionary.")
+
+                new_service['environment'] = env_vars
+
+                # --- Volumes ---
+                # Ensure volumes list exists (might be added by anchor merge, check needed?)
+                # setdefault is safer if anchor doesn't guarantee 'volumes'
+                if 'volumes' not in new_service:
+                     new_service['volumes'] = []
+                elif not isinstance(new_service['volumes'], list):
+                     print(f"Warning: 'volumes' merged from anchor for service '{service_name}' is not a list. Overwriting.")
+                     new_service['volumes'] = []
+
+                # Append the entity volume mount (read-only)
+                new_service['volumes'].append(f"{abs_host_entity_path}:{CONTAINER_ENTITY_PATH}:ro")
+
+                # --- Add to Services Map ---
+                services_map[service_name] = new_service
+                overall_service_index += 1
+
+        # --- Write Output File ---
+        header = [
+            "# Generated by graphiti CLI",
+            "# Do not edit this file directly. Modify base-compose.yaml or project-specific mcp-config.yaml files instead.",
+            "",
+            "# --- Custom MCP Services Info ---",
+            f"# Default Ports: Assigned sequentially starting from {DEFAULT_PORT_START + 1}",
+            "#              Can be overridden by specifying 'port_default' in project's mcp-config.yaml.",
+        ]
+        try:
+            write_yaml_file(compose_data, output_compose_path, header=header)
+            print(f"Successfully generated '{output_compose_path}'.")
+        except Exception:
+            # Error already printed by write_yaml_file
+             sys.exit(1)
+
+    ```
+
+    _(Self-correction: Added explicit checks for file existence and type before loading YAML. Ensured paths passed to `update_registry_logic` are absolute. Handled potential non-existence of 'volumes' key after merge. Defaulted `group_id` to `project_name`.)_
+
+6.  **`graphiti_cli/commands.py` (Command Implementations):**
+    (This file contains the actual logic called by `main.py`. It imports helpers from `core.py` and `yaml_utils.py`).
+
+        ```python
+        # graphiti_cli/commands.py
+        import sys
+        import shutil
+        from pathlib import Path
+        import os
+        import re # For entity name validation
+
+        from . import core
+        from . import yaml_utils
+
+        # --- Docker Commands ---
+
+        def docker_up(detached: bool, log_level: str):
+        	core.ensure_docker_compose_file()
+        	core.ensure_dist_for_build()
+        	cmd = ["up", "--build", "--force-recreate"]
+        	core.run_docker_compose(cmd, log_level, detached)
+        	print(f"{core.GREEN}Docker compose up completed.{core.NC}")
+
+        def docker_down(log_level: str):
+        	core.ensure_docker_compose_file() # Needed for compose to find project
+        	core.run_docker_compose(["down"], log_level)
+        	print(f"{core.GREEN}Docker compose down completed.{core.NC}")
+
+        def docker_restart(detached: bool, log_level: str):
+        	print(f"{core.BOLD}Restarting Graphiti containers: first down, then up...{core.NC}")
+        	docker_down(log_level) # Run down first
+        	docker_up(detached, log_level) # Then run up
+        	print(f"{core.GREEN}Restart sequence completed.{core.NC}")
+
+        def docker_reload(service_name: str):
+        	core.ensure_docker_compose_file()
+        	print(f"{core.BOLD}Attempting to restart service '{core.CYAN}{service_name}{core.NC}'...{core.NC}")
+        	try:
+        		# Use check=True to let run_command handle the error printing on failure
+        		core.run_docker_compose(["restart", service_name], check=True)
+        		print(f"{core.GREEN}Service '{service_name}' restarted successfully.{core.NC}")
+        	except SystemExit: # run_command exits on error if check=True
+        		# Error message already printed by run_command via CalledProcessError handling
+        		print(f"{core.RED}Failed to restart service '{service_name}'. Check service name and if stack is running.{core.NC}")
+        		# No need to exit again, run_command already did
+
+        def docker_compose_generate():
+        	print(f"{core.BOLD}Generating docker-compose.yml from templates...{core.NC}")
+        	mcp_server_dir = core.get_mcp_server_dir()
+        	try:
+        		yaml_utils.generate_compose_logic(mcp_server_dir)
+        		# Success message printed within generate_compose_logic
+        	except Exception as e:
+        		print(f"{core.RED}Error: Failed to generate docker-compose.yml file: {e}{core.NC}")
+        		sys.exit(1)
+
+        # --- Project/File Management Commands ---
+
+        def init_project(project_name: str, target_dir: Path):
+            """
+            Initialize a Graphiti project.
+
+            Args:
+                project_name (str): Name of the project
+                target_dir (Path): Target directory for the project
+            """
+            # Basic validation
+            if not re.fullmatch(r'^[a-zA-Z0-9_-]+$', project_name):
+                print(f"{core.RED}Error: Invalid PROJECT_NAME '{project_name}'. Use only letters, numbers, underscores, and hyphens.{core.NC}")
+                sys.exit(1)
+
+            print(f"Initializing Graphiti project '{core.CYAN}{project_name}{core.NC}' in '{core.CYAN}{target_dir}{core.NC}'...")
+
+            # Create ai/graph directory structure
+            graph_dir = target_dir / "ai" / "graph"
+            try:
+                graph_dir.mkdir(parents=True, exist_ok=True)
+                print(f"Created directory structure: {core.CYAN}{graph_dir}{core.NC}")
+            except OSError as e:
+                print(f"{core.RED}Error creating directory structure {graph_dir}: {e}{core.NC}")
+                sys.exit(1)
+
+            # Create mcp-config.yaml in ai/graph directory
+            config_path = graph_dir / "mcp-config.yaml"
+            config_content = f"""# Configuration for project: {project_name}
+
+    services:
+      - id: {project_name}-main  # Service ID (used for default naming) # container_name: "custom-name" # Optional: Specify custom container name # port_default: 8001 # Optional: Specify custom host port
+        group_id: "{project_name}"  # Graph group ID
+        entity_dir: "entities"  # Relative path to entity definitions within ai/graph # environment: # Optional: Add non-secret env vars here # MY_FLAG: "true"
+    """
+    try:
+    target_dir.mkdir(parents=True, exist_ok=True) # Ensure target dir exists
+    config_path.write_text(config_content)
+    print(f"Created template {core.CYAN}{config_path}{core.NC}")
+    except OSError as e:
+    print(f"{core.RED}Error creating config file {config_path}: {e}{core.NC}")
+    sys.exit(1)
+
+            # Create entities directory within ai/graph
+            entities_dir = graph_dir / "entities"
+            try:
+                entities_dir.mkdir(exist_ok=True)
+                (entities_dir / ".gitkeep").touch(exist_ok=True) # Create or update timestamp
+                print(f"Created entities directory: {core.CYAN}{entities_dir}{core.NC}")
+            except OSError as e:
+                print(f"{core.RED}Error creating entities directory {entities_dir}: {e}{core.NC}")
+                sys.exit(1)
+
+            # Set up rules
+            setup_rules(project_name, target_dir) # Call the rules setup logic
+
+            # Update central registry
+            mcp_server_dir = core.get_mcp_server_dir()
+            registry_path = mcp_server_dir / "mcp-projects.yaml"
+            print(f"Updating central project registry: {core.CYAN}{registry_path}{core.NC}")
+            try:
+                # Ensure paths are absolute before passing
+                success = yaml_utils.update_registry_logic(
+                    registry_file=registry_path,
+                    project_name=project_name,
+                    root_dir=target_dir.resolve(),
+                    config_file=config_path.resolve(),
+                    enabled=True
+                )
+                if not success:
+                    print(f"{core.RED}Error: Failed to update project registry (see previous errors).{core.NC}")
+                    sys.exit(1)
+            except Exception as e:
+                print(f"{core.RED}Error updating project registry: {e}{core.NC}")
+                sys.exit(1)
+
+            print(f"{core.GREEN}Graphiti project '{project_name}' initialization complete.{core.NC}")
+
+
+        def setup_rules(project_name: str, target_dir: Path):
+        	"""Sets up the .cursor/rules directory and symlinks."""
+        	print(f"Setting up Graphiti Cursor rules for project '{core.CYAN}{project_name}{core.NC}' in {core.CYAN}{target_dir}{core.NC}")
+        	mcp_server_dir = core.get_mcp_server_dir()
+        	rules_source_dir = mcp_server_dir / "rules"
+        	templates_source_dir = rules_source_dir / "templates"
+        	cursor_rules_dir = target_dir / ".cursor" / "rules" / "graphiti"
+
+        	try:
+        		cursor_rules_dir.mkdir(parents=True, exist_ok=True)
+        		print(f"Created/verified rules directory: {core.CYAN}{cursor_rules_dir}{core.NC}")
+
+        		core_rule_src = rules_source_dir / "graphiti-mcp-core-rules.md"
+        		maint_rule_src = rules_source_dir / "graphiti-knowledge-graph-maintenance.md"
+        		schema_template_src = templates_source_dir / "project_schema_template.md"
+
+        		core_rule_link = cursor_rules_dir / "graphiti-mcp-core-rules.mdc"
+        		maint_rule_link = cursor_rules_dir / "graphiti-knowledge-graph-maintenance.mdc"
+        		target_schema_file = cursor_rules_dir / f"graphiti-{project_name}-schema.mdc"
+
+        		# Check source files
+        		missing_files = []
+        		if not core_rule_src.is_file(): missing_files.append(core_rule_src)
+        		if not maint_rule_src.is_file(): missing_files.append(maint_rule_src)
+        		if not schema_template_src.is_file(): missing_files.append(schema_template_src)
+        		if missing_files:
+        			print(f"{core.RED}Error: Source rule/template files not found:{core.NC}")
+        			for f in missing_files: print(f"  - {f}")
+        			sys.exit(1)
+
+        		# Create/Update symlinks using relative paths for better portability
+        		try:
+        			core_rel_path = os.path.relpath(core_rule_src.resolve(), start=cursor_rules_dir.resolve())
+        			maint_rel_path = os.path.relpath(maint_rule_src.resolve(), start=cursor_rules_dir.resolve())
+        		except ValueError:
+        			# Handle case where paths are on different drives (Windows) - fall back to absolute
+        			print(f"{core.YELLOW}Warning: Cannot create relative symlink paths (different drives?). Using absolute paths.{core.NC}")
+        			core_rel_path = core_rule_src.resolve()
+        			maint_rel_path = maint_rule_src.resolve()
+
+        		# Unlink if it exists and is not the correct link target
+        		if core_rule_link.is_symlink():
+        			if core_rule_link.readlink() != Path(core_rel_path):
+        				core_rule_link.unlink()
+        		elif core_rule_link.exists(): # It exists but isn't a symlink
+        			core_rule_link.unlink()
+
+        		if not core_rule_link.exists():
+        			core_rule_link.symlink_to(core_rel_path)
+        			print(f"Linking core rule: {core.CYAN}{core_rule_link.name}{core.NC} -> {core.CYAN}{core_rel_path}{core.NC}")
+        		else:
+        			print(f"Core rule link already exists: {core.CYAN}{core_rule_link.name}{core.NC}")
+
+
+        		if maint_rule_link.is_symlink():
+        			if maint_rule_link.readlink() != Path(maint_rel_path):
+        				maint_rule_link.unlink()
+        		elif maint_rule_link.exists():
+        			maint_rule_link.unlink()
+
+        		if not maint_rule_link.exists():
+        			maint_rule_link.symlink_to(maint_rel_path)
+        			print(f"Linking maintenance rule: {core.CYAN}{maint_rule_link.name}{core.NC} -> {core.CYAN}{maint_rel_path}{core.NC}")
+        		else:
+        			print(f"Maintenance rule link already exists: {core.CYAN}{maint_rule_link.name}{core.NC}")
+
+        		# Generate schema file from template
+        		if target_schema_file.exists():
+        			print(f"{core.YELLOW}Warning: Project schema file already exists, skipping template generation: {target_schema_file}{core.NC}")
+        		else:
+        			print(f"Generating template project schema file: {core.CYAN}{target_schema_file}{core.NC}")
+        			template_content = schema_template_src.read_text()
+        			schema_content = template_content.replace("__PROJECT_NAME__", project_name)
+        			target_schema_file.write_text(schema_content)
+
+        		print(f"{core.GREEN}Graphiti Cursor rules setup complete for project '{project_name}'.{core.NC}")
+
+        	except OSError as e:
+        		print(f"{core.RED}Error setting up rules: {e}{core.NC}")
+        		sys.exit(1)
+        	except Exception as e:
+        		print(f"{core.RED}An unexpected error occurred during rule setup: {e}{core.NC}")
+        		sys.exit(1)
+
+
+        def _to_pascal_case(snake_str: str) -> str:
+        	"""Converts snake_case or kebab-case to PascalCase."""
+        	parts = re.split('_|-', snake_str)
+        	return "".join(part.capitalize() for part in parts)
+
+        def create_entity_set(set_name: str, target_dir: Path):
+            """Creates a new directory and example entity file for an entity set within a project's ai/graph directory."""
+            # Validate SET_NAME format
+            if not re.fullmatch(r'^[a-zA-Z0-9_-]+$', set_name):
+                print(f"{core.RED}Error: Invalid SET_NAME '{set_name}'. Use only letters, numbers, underscores, and hyphens.{core.NC}")
+                sys.exit(1)
+
+            # Load project configuration from ai/graph directory
+            graph_dir = target_dir / "ai" / "graph"
+            config_path = graph_dir / "mcp-config.yaml"
+            if not config_path.is_file():
+                print(f"{core.RED}Error: Project configuration file not found: {config_path}{core.NC}")
+                print(f"Make sure the project has been initialized with 'graphiti init' first.")
+                sys.exit(1)
+
+            project_config = yaml_utils.load_yaml_file(config_path, safe=True)
+            if project_config is None:
+                print(f"{core.RED}Error: Failed to load project configuration from: {config_path}{core.NC}")
+                sys.exit(1)
+
+            # Validate project config structure
+            if 'services' not in project_config or not isinstance(project_config['services'], list) or not project_config['services']:
+                print(f"{core.RED}Error: Invalid or missing 'services' section in project configuration: {config_path}{core.NC}")
+                sys.exit(1)
+
+            # Extract the entity directory name from the first service entry
+            entity_dir_name = project_config.get('services', [{}])[0].get('entity_dir', 'entities')
+
+            # Calculate paths - use graph_dir as base
+            project_entity_base_dir = graph_dir / entity_dir_name
+            new_set_dir = project_entity_base_dir / set_name
+
+            if new_set_dir.exists():
+                print(f"{core.RED}Error: Entity type set '{set_name}' already exists at: {new_set_dir}{core.NC}")
+                sys.exit(1)
+
+            try:
+                new_set_dir.mkdir(parents=True)
+                print(f"Created entity type set directory: {core.CYAN}{new_set_dir}{core.NC}")
+
+                class_name = _to_pascal_case(set_name) + "Entity" # Add suffix convention
+                # Use set_name for lowercase replacements, class_name for class definition
+                entity_file_path = new_set_dir / f"{class_name}.py" # Name file after class
+
+                if not example_template_path.is_file():
+                    print(f"{core.YELLOW}Warning: Template file not found: {example_template_path}{core.NC}")
+                    print("Creating a minimal entity file instead.")
+                    minimal_content = f"""from pydantic import BaseModel, Field
+
+        class {class_name}(BaseModel):
+        	\"\"\"Example entity for the '{set_name}' set.\"\"\"
+
+        	example_field: str = Field(
+        		...,
+        		description='An example field.',
+        	)
+        """
+                    entity_file_path.write_text(minimal_content)
+                else:
+                    template_content = example_template_path.read_text()
+                    # Perform replacements carefully
+                    content = template_content.replace("class Product(BaseModel):", f"class {class_name}(BaseModel):")
+                    # Replace descriptions, trying to be specific
+                    content = content.replace("A Product represents", f"A {class_name} represents")
+                    content = content.replace("about Products mentioned", f"about {class_name} entities mentioned")
+                    content = content.replace("product names", f"{set_name} names")
+                    content = content.replace("the product belongs", f"the {set_name} belongs")
+                    content = content.replace("description of the product", f"description of the {set_name}")
+                    # Add more replacements if needed based on the template content
+
+                    entity_file_path.write_text(content)
+                    print(f"Created entity file using template: {core.CYAN}{entity_file_path}{core.NC}")
+
+                print(f"{core.GREEN}Entity set '{set_name}' successfully created.{core.NC}")
+
+            except OSError as e:
+                print(f"{core.RED}Error creating entity set '{set_name}': {e}{core.NC}")
+                sys.exit(1)
+            except Exception as e:
+                print(f"{core.RED}An unexpected error occurred creating entity set '{set_name}': {e}{core.NC}")
+                sys.exit(1)
+
+        ```
+
+This completes the `commands.py` file, providing the implementation logic for all the commands defined in `main.py`. Each function orchestrates the necessary steps, calling helpers from `core.py` for process execution and path management, and `yaml_utils.py` for configuration file handling. Error handling is included using `try...except` blocks and checking subprocess results.
+````
+
+## File: .ai/plans/refactor-cli-plan.md
+````markdown
+Okay, here is a step-by-step implementation plan for migrating the `graphiti` Bash script to a Python CLI tool, based on the agreed-upon architecture using Typer. This plan is designed for execution by an expert AI implementation agent.
+
+**Objective:** Replace the existing `scripts/graphiti` Bash script with a new Python-based CLI tool located in `graphiti_cli/`, managed via `pyproject.toml` and using Typer, `ruamel.yaml`, `subprocess`, and `pathlib`. The new tool should replicate the functionality and command-line interface of the original script while integrating the logic of `_yaml_helper.py` and `generate_compose.py`.
+
+**Assumptions:**
+
+1.  The execution agent has write access to the filesystem within the repository.
+2.  Python 3.10+ and `pip` (or `uv`) are available in the execution environment.
+3.  Docker and Docker Compose V2 are installed and accessible.
+4.  The existing code provided (including the proposed Python architecture snippets) is accurate and complete for the migration task.
+5.  The agent understands how to install Python packages using `pip install -e .` based on `pyproject.toml`.
+
+**Potential Risks:**
+
+1.  **Subtle Behavioral Differences:** Differences in how subprocesses are handled or paths are resolved between Bash and Python could lead to subtle behavioral changes. Thorough testing is crucial.
+2.  **Error Handling:** Python's error handling might expose issues previously masked in the Bash script, or new error conditions might arise.
+3.  **Dependency Conflicts:** Ensure CLI dependencies in `pyproject.toml` don't conflict with server dependencies if installed in the same environment.
+4.  **Path Resolution:** Consistency in handling absolute vs. relative paths, especially for symlinks and configuration files, needs careful implementation.
+
+**Implementation Plan:**
+
+**Phase 1: Setup and Project Structure** ✅ COMPLETED
+
+1.  **Create CLI Package Directory:** ✅ COMPLETED
+    *   Action: Create a new directory named `graphiti_cli` within the `mcp_server` directory (not at the repository root as initially planned).
+    *   Files Involved: N/A (creates `mcp_server/graphiti_cli/`)
+    *   Acceptance: The `mcp_server/graphiti_cli/` directory exists.
+2.  **Create Initial Python Files:** ✅ COMPLETED
+    *   Action: Create the following empty Python files within the `mcp_server/graphiti_cli/` directory:
+        *   `__init__.py`
+        *   `main.py`
+        *   `core.py`
+        *   `commands.py`
+        *   `yaml_utils.py`
+    *   Files Involved: `mcp_server/graphiti_cli/__init__.py`, `mcp_server/graphiti_cli/main.py`, `mcp_server/graphiti_cli/core.py`, `mcp_server/graphiti_cli/commands.py`, `mcp_server/graphiti_cli/yaml_utils.py`
+    *   Acceptance: All five specified Python files exist within `mcp_server/graphiti_cli/` and are initially empty.
+3.  **Update `pyproject.toml`:** ✅ COMPLETED
+    *   Action: Modify the `mcp_server/pyproject.toml` file.
+        *   Add `typer[all]>=0.9.0` and `python-dotenv>=1.0.0` to the `[project.dependencies]` list.
+        *   Add the `[project.scripts]` section as defined in the architecture proposal (`graphiti = "graphiti_cli.main:app"`).
+        *   Add the `[build-system]` section.
+        *   Add the `[tool.setuptools.packages.find]` section to explicitly include only the `graphiti_cli` package.
+    *   Files Involved: `mcp_server/pyproject.toml`
+    *   Acceptance: `pyproject.toml` contains the new dependencies, the `[project.scripts]` entry point, and proper package configuration.
+4.  **Install Dependencies:** ✅ COMPLETED
+    *   Action: Run `pip install -e .` in the `mcp_server` directory. This installs the necessary dependencies (Typer, etc.) and makes the `graphiti` command (defined in `project.scripts`) available in the environment based on the (currently empty) `graphiti_cli` package.
+    *   Files Involved: `mcp_server/pyproject.toml`, Python environment `site-packages`.
+    *   Acceptance: The command runs without errors. The package is successfully installed in development mode with all dependencies.
+    *   Notes: The `graphiti` command currently still points to the original Bash script since our Python implementation files are empty.
+
+**Phase 2: Implement Core and YAML Utilities** ✅ COMPLETED
+
+5.  **Implement Core Utilities (`core.py`):** ✅ COMPLETED
+    *   Action: Populate `mcp_server/graphiti_cli/core.py` with the Python code provided in the architecture proposal. This includes:
+        *   ANSI color constants.
+        *   `LogLevel` enum.
+        *   `_find_repo_root()`, `get_repo_root()`, `get_mcp_server_dir()` functions (ensure robust path finding).
+        *   `run_command()` function for executing subprocesses reliably.
+        *   Additional utilities like `run_docker_compose()`, `ensure_docker_compose_file()`, and `ensure_dist_for_build()`.
+    *   Files Involved: `mcp_server/graphiti_cli/core.py`
+    *   Acceptance: The file contains the specified functions and constants. Implemented with proper type hints, docstrings, and error handling.
+6.  **Implement YAML Utilities (`yaml_utils.py`):** ✅ COMPLETED
+    *   Action: Populate `mcp_server/graphiti_cli/yaml_utils.py` with the Python code provided in the architecture proposal. This integrates logic from the old helper scripts:
+        *   YAML instance initializations (`yaml_rt`, `yaml_safe`).
+        *   `load_yaml_file()`, `write_yaml_file()` helper functions.
+        *   `update_registry_logic()` function (ported from `_yaml_helper.py`).
+        *   `generate_compose_logic()` function (ported from `generate_compose.py`). Ensure it uses constants/helpers from `core.py` where appropriate.
+    *   Files Involved: `mcp_server/graphiti_cli/yaml_utils.py`
+    *   Acceptance: The file contains the specified functions. Implemented with proper type hints, docstrings, and error handling.
+
+**Phase 3: Implement Command Logic** ✅ COMPLETED
+
+7.  **Implement Command Logic (`commands.py`):** ✅ COMPLETED
+    *   Action: Populate `mcp_server/graphiti_cli/commands.py` with the Python functions corresponding to each CLI command (`docker_up`, `docker_down`, `docker_restart`, `docker_reload`, `docker_compose_generate`, `init_project`, `setup_rules`, `create_entity_set`). Use the provided code from the architecture proposal.
+        *   Ensure these functions correctly import and call helpers from `core.py` and `yaml_utils.py`.
+        *   Carefully translate file system operations (symlinking in `setup_rules`, directory/file creation in `init_project` and `create_entity_set`) using `pathlib` and `shutil`.
+        *   Implement the `ensure_docker_compose_file()` and `ensure_dist_for_build()` logic by calling the relevant functions in `core.py`.
+    *   Files Involved: `mcp_server/graphiti_cli/commands.py`, `mcp_server/graphiti_cli/core.py`, `mcp_server/graphiti_cli/yaml_utils.py`
+    *   Acceptance: The file contains functions for each command. Code compiles and logical structure matches the Bash script's intent for each command.
+
+**Phase 4: Define CLI Interface** ✅ COMPLETED
+
+8.  **Define Typer App (`main.py`):** ✅ COMPLETED
+    *   Action: Populate `mcp_server/graphiti_cli/main.py` with the Typer application setup, callback, and command definitions as provided in the architecture proposal.
+        *   Instantiate `typer.Typer()`.
+        *   Define the `main_callback` to find the repo root.
+        *   Define each command (`@app.command()`) with appropriate arguments (`typer.Argument`) and options (`typer.Option`) using `Annotated`.
+        *   Ensure each command function in `main.py` calls the corresponding implementation function in `commands.py`.
+    *   Files Involved: `mcp_server/graphiti_cli/main.py`, `mcp_server/graphiti_cli/commands.py`
+    *   Acceptance: The file contains the Typer app definition. Running `graphiti --help` should display the list of commands and their options, matching the interface of the old script.
+
+**Phase 5: Cleanup** 🕒 PENDING
+
+9.  **Remove Old Scripts:**
+    *   Action: Delete the following files:
+        *   `mcp_server/scripts/graphiti` (The original Bash script)
+        *   `mcp_server/scripts/_yaml_helper.py`
+        *   `mcp_server/generate_compose.py`
+    *   Files Involved: `mcp_server/scripts/graphiti`, `mcp_server/scripts/_yaml_helper.py`, `mcp_server/generate_compose.py`
+    *   Acceptance: The specified files no longer exist in the repository.
+
+10. **Verify Global Command Path:** (NEW STEP) ✅ COMPLETED
+    *   Action: Ensure the `graphiti` command executed from the terminal correctly points to the new Python CLI entry point installed by `pip install -e .` (or equivalent).
+        *   Run `which graphiti` (or `type graphiti` depending on shell) to identify the exact script being executed.
+        *   Verify this path corresponds to the Python environment where the `mcp-server` package was installed editable.
+        *   Check common `PATH` directories (e.g., `/usr/local/bin`, `~/.local/bin`, `~/bin`) for any older conflicting `graphiti` files or symlinks and remove them if found.
+    *   Files Involved: Files/symlinks in system `PATH` directories, Python environment's `bin` directory.
+    *   Acceptance: The `which graphiti` command resolves to the correct entry point script created by the package installation. No conflicting executables are found earlier in the `PATH`.
+
+**Phase 6: Verification and Testing** 🔄 IN PROGRESS (Requires Re-verification After Cleanup)
+
+11. **Functional Testing (Using Global Command):** (REVISED STEP)
+    *   Action: Execute the *globally installed* `graphiti` command (verified in Step 10) for each subcommand and option combination. Verify the outputs and side effects are correct and match the behavior tested previously via `python -m ...`. Re-run key tests:
+        *   `graphiti --help` (Verify Python CLI help output)
+        *   `graphiti compose` -> Check `docker-compose.yml` generation.
+        *   `graphiti up --log-level debug` -> Check build configuration message (should now correctly detect published package), check container logs for DEBUG level.
+        *   `graphiti down`
+        *   `graphiti init test-py-proj-global ./temp_test_py_proj_global`
+        *   `graphiti entity my-global-set ./temp_test_py_proj_global`
+        *   `graphiti rules test-py-proj-global ./temp_test_py_proj_global`
+        *   `graphiti restart`
+        *   `graphiti reload <service_name>`
+    *   Files Involved: All CLI files, `mcp-projects.yaml`, `docker-compose.yml`, Docker environment, test project directories.
+    *   Acceptance Criteria:
+        *   All commands execute using the *global* `graphiti` entry point without Python errors.
+        *   The build configuration check (`ensure_dist_for_build`) now correctly identifies the published package based on the saved `pyproject.toml`.
+        *   File system and Docker operations are successful and produce the expected results.
+        *   Outputs match those observed during module-based testing.
+
+**Next Steps:**
+1. Execute Phase 5: Cleanup (Steps 9 & 10).
+2. Re-run Phase 6: Verification and Testing (Step 11) using the global command.
+
+## Latest Progress Update
+
+- Successfully tested the `compose` command:
+  - The command generated a new `docker-compose.yml` file based on `base-compose.yaml` and `mcp-projects.yaml`.
+  - MD5 checksum comparisons confirm that the generated file is identical to previous outputs.
+  - Error handling was validated by simulating scenarios with a missing and corrupted `base-compose.yaml` file.
+- This progress is part of Phase 6: Verification and Testing of the new Python CLI tool.
+- Next planned action: Test the `up` command to start Docker containers.
+
+## Docker Environment Management Progress (April 2025)
+
+- Successfully tested the Docker environment management commands:
+  - Fixed a critical environment variable issue by adding `MCP_PORT=8000` to the `.env` file
+  - Tested the `down` command to ensure it properly stops and removes all containers
+  - Tested the `up` command with the following variants:
+    - Basic usage to start containers with default settings
+    - Detached mode (`-d` flag) to run containers in the background
+    - Custom logging with `--log-level debug` option
+  - Verified that the Docker Compose environment variables are correctly passed
+  - Confirmed that the build preparation logic works as expected with local wheel files
+  
+- Findings and observations:
+  - The CLI successfully regenerates the `docker-compose.yml` file before each operation
+  - Proper error handling is in place for warnings about missing configuration files
+  - Environment variable management works correctly for both CLI and container settings
+  - The commands match the intended behavior from the original Bash script
+
+- Next steps:
+  - Test the `restart` command (combines `down` and `up` operations)
+  - Test the `reload` command (for restarting individual services)
+  - Complete Phase 6: Verification and Testing
+  - Proceed to Phase 5: Cleanup to remove the original scripts
+````
+
 ## File: entity_types/base/preferences.py
-```python
+````python
 """Preference entity type for Graphiti MCP Server."""
 
 from pydantic import BaseModel, Field
@@ -117,10 +1105,10 @@ class Preference(BaseModel):
         ...,
         description='Brief description of the preference. Only use information mentioned in the context to write this description.',
     )
-```
+````
 
 ## File: entity_types/base/procedures.py
-```python
+````python
 """Procedure entity type for Graphiti MCP Server."""
 
 from pydantic import BaseModel, Field
@@ -145,10 +1133,10 @@ class Procedure(BaseModel):
         ...,
         description='Brief description of the procedure. Only use information mentioned in the context to write this description.',
     )
-```
+````
 
 ## File: entity_types/base/requirements.py
-```python
+````python
 """Requirement entity type for Graphiti MCP Server."""
 
 from pydantic import BaseModel, Field
@@ -182,10 +1170,10 @@ class Requirement(BaseModel):
     )
 
 # No need for explicit registration - will be auto-registered
-```
+````
 
 ## File: entity_types/candidates/Candidate.py
-```python
+````python
 """Candidate entity type for Graphiti MCP Server."""
 
 from typing import List, Optional
@@ -271,10 +1259,10 @@ class Candidate(BaseModel):
     ) 
 
 # No need for explicit registration - will be auto-registered
-```
+````
 
 ## File: entity_types/candidates/Certification.py
-```python
+````python
 """Certification entity type for Graphiti MCP Server."""
 
 from typing import List, Optional
@@ -356,10 +1344,10 @@ class Certification(BaseModel):
     )
 
 # No need for explicit registration - will be auto-registered
-```
+````
 
 ## File: entity_types/candidates/Education.py
-```python
+````python
 """Education entity type for Graphiti MCP Server."""
 
 from typing import List, Optional
@@ -471,10 +1459,10 @@ class Education(BaseModel):
     )
 
 # No need for explicit registration - will be auto-registered
-```
+````
 
 ## File: entity_types/candidates/Insight.py
-```python
+````python
 """Insight entity type for Graphiti MCP Server."""
 
 from typing import List, Optional
@@ -580,10 +1568,10 @@ class Insight(BaseModel):
     )
 
 # No need for explicit registration - will be auto-registered
-```
+````
 
 ## File: entity_types/candidates/Skill.py
-```python
+````python
 """Skill entity type for Graphiti MCP Server."""
 
 from typing import List, Optional
@@ -672,10 +1660,10 @@ class Skill(BaseModel):
     )
 
 # No need for explicit registration - will be auto-registered
-```
+````
 
 ## File: entity_types/candidates/WorkExperience.py
-```python
+````python
 """WorkExperience entity type for Graphiti MCP Server."""
 
 from typing import List, Optional
@@ -767,10 +1755,10 @@ class WorkExperience(BaseModel):
     )
 
 # No need for explicit registration - will be auto-registered
-```
+````
 
 ## File: entity_types/example/company_entity.py
-```python
+````python
 """Definition for a Company entity type."""
 
 from pydantic import BaseModel, Field
@@ -805,10 +1793,10 @@ class Company(BaseModel):
         default=None,
         description='The industry the company operates in (e.g., "Technology", "Finance"), if mentioned.',
     )
-```
+````
 
 ## File: entity_types/example/custom_entity_example.py
-```python
+````python
 """Example of how to create a custom entity type for Graphiti MCP Server."""
 
 from pydantic import BaseModel, Field
@@ -849,10 +1837,10 @@ class Product(BaseModel):
         ...,
         description='The category the product belongs to (e.g., "Electronics", "Software", "Service") based on the text.',
     )
-```
+````
 
 ## File: entity_types/graphiti/ArchitecturalPattern.py
-```python
+````python
 """Definition of the ArchitecturalPattern entity type for Graphiti."""
 
 from pydantic import BaseModel, Field
@@ -902,10 +1890,10 @@ class ArchitecturalPatternEntity(BaseModel):
         None,
         description='System components or modules that implement or are directly affected by this pattern.',
     )
-```
+````
 
 ## File: entity_types/graphiti/DataPipeline.py
-```python
+````python
 """Definition of the DataPipeline entity type for Graphiti."""
 
 from pydantic import BaseModel, Field
@@ -959,10 +1947,10 @@ class DataPipelineEntity(BaseModel):
         None,
         description='System components or modules involved in implementing this pipeline.',
     )
-```
+````
 
 ## File: entity_types/graphiti/IntegrationPattern.py
-```python
+````python
 """Definition of the IntegrationPattern entity type for Graphiti."""
 
 from pydantic import BaseModel, Field
@@ -1017,10 +2005,10 @@ class IntegrationPatternEntity(BaseModel):
         None,
         description='The benefits or advantages this integration pattern provides.',
     )
-```
+````
 
 ## File: entity_types/graphiti/RetrievalMethod.py
-```python
+````python
 """Definition of the RetrievalMethod entity type for Graphiti."""
 
 from pydantic import BaseModel, Field
@@ -1075,10 +2063,10 @@ class RetrievalMethodEntity(BaseModel):
         None,
         description='Specific scenarios or use cases where this retrieval method is particularly effective.',
     )
-```
+````
 
 ## File: entity_types/graphiti/TemporalModel.py
-```python
+````python
 """Definition of the TemporalModel entity type for Graphiti."""
 
 from pydantic import BaseModel, Field
@@ -1133,10 +2121,10 @@ class TemporalModelEntity(BaseModel):
         None,
         description='Specific use cases or scenarios where this temporal model provides value.',
     )
-```
+````
 
 ## File: entity_types/__init__.py
-```python
+````python
 """Entity Types package.
 
 This package contains entity type definitions for Graphiti MCP Server.
@@ -1147,10 +2135,10 @@ from entity_types.entity_registry import (
     get_entity_types,
     get_entity_type_subset,
 )
-```
+````
 
 ## File: entity_types/entity_registry.py
-```python
+````python
 """Entity Types Registry for Graphiti MCP Server.
 
 This module provides a registry to manage entity types in a modular way.
@@ -1194,10 +2182,1567 @@ def get_entity_type_subset(names: list[str]) -> Dict[str, Type[BaseModel]]:
         A dictionary containing only the specified entity types
     """
     return {name: _ENTITY_REGISTRY[name] for name in names if name in _ENTITY_REGISTRY}
+````
+
+## File: graphiti_cli/commands.py
+````python
+#!/usr/bin/env python3
+"""
+Command implementations for the Graphiti CLI tool.
+This module contains the functions that are called by the CLI commands.
+"""
+import sys
+import shutil
+from pathlib import Path
+import os
+import re  # For entity name validation
+
+from . import core
+from . import yaml_utils
+
+# --- Docker Commands ---
+
+def docker_up(detached: bool, log_level: str):
+    """
+    Start all containers using Docker Compose (builds first).
+    
+    Args:
+        detached (bool): Whether to run in detached mode
+        log_level (str): Log level to use
+    """
+    core.ensure_docker_compose_file()
+    core.ensure_dist_for_build()
+    cmd = ["up", "--build", "--force-recreate"]
+    core.run_docker_compose(cmd, log_level, detached)
+    print(f"{core.GREEN}Docker compose up completed.{core.NC}")
+
+def docker_down(log_level: str):
+    """
+    Stop and remove all containers using Docker Compose.
+    
+    Args:
+        log_level (str): Log level to use
+    """
+    core.ensure_docker_compose_file()  # Needed for compose to find project
+    core.run_docker_compose(["down"], log_level)
+    print(f"{core.GREEN}Docker compose down completed.{core.NC}")
+
+def docker_restart(detached: bool, log_level: str):
+    """
+    Restart all containers: runs 'down' then 'up'.
+    
+    Args:
+        detached (bool): Whether to run in detached mode
+        log_level (str): Log level to use
+    """
+    print(f"{core.BOLD}Restarting Graphiti containers: first down, then up...{core.NC}")
+    core.ensure_docker_compose_file()  # Ensure docker-compose.yml exists before the restart sequence
+    core.run_docker_compose(["down"], log_level)
+    docker_up(detached, log_level)
+    print(f"{core.GREEN}Restart sequence completed.{core.NC}")
+
+def docker_reload(service_name: str):
+    """
+    Restart a specific running service container.
+    
+    Args:
+        service_name (str): Name of the service to reload
+    """
+    core.ensure_docker_compose_file()
+    print(f"{core.BOLD}Attempting to restart service '{core.CYAN}{service_name}{core.NC}'...{core.NC}")
+    try:
+        core.run_docker_compose(["restart", service_name], log_level=core.LogLevel.info.value)
+        print(f"{core.GREEN}Service '{service_name}' restarted successfully.{core.NC}")
+    except Exception:
+        print(f"{core.RED}Failed to restart service '{service_name}'. Check service name and if stack is running.{core.NC}")
+        sys.exit(1)
+
+def docker_compose_generate():
+    """
+    Generate docker-compose.yml from base and project configs.
+    """
+    print(f"{core.BOLD}Generating docker-compose.yml from templates...{core.NC}")
+    mcp_server_dir = core.get_mcp_server_dir()
+    try:
+        yaml_utils.generate_compose_logic(mcp_server_dir)  # Generate with default level
+        # Success message printed within generate_compose_logic
+    except Exception as e:
+        print(f"{core.RED}Error: Failed to generate docker-compose.yml file: {e}{core.NC}")
+        sys.exit(1)
+
+# --- Project/File Management Commands ---
+
+def init_project(project_name: str, target_dir: Path):
+    """
+    Initialize a new Graphiti project.
+    
+    Args:
+        project_name (str): Name of the project
+        target_dir (Path): Target directory for the project
+    """
+    # Basic validation
+    if not re.fullmatch(r'^[a-zA-Z0-9_-]+$', project_name):
+        print(f"{core.RED}Error: Invalid PROJECT_NAME '{project_name}'. Use only letters, numbers, underscores, and hyphens.{core.NC}")
+        sys.exit(1)
+
+    print(f"Initializing Graphiti project '{core.CYAN}{project_name}{core.NC}' in '{core.CYAN}{target_dir}{core.NC}'...")
+
+    # Create ai/graph directory structure
+    graph_dir = target_dir / "ai" / "graph"
+    try:
+        graph_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Created directory structure: {core.CYAN}{graph_dir}{core.NC}")
+    except OSError as e:
+        print(f"{core.RED}Error creating directory structure {graph_dir}: {e}{core.NC}")
+        sys.exit(1)
+
+    # Create mcp-config.yaml in ai/graph directory
+    config_path = graph_dir / "mcp-config.yaml"
+    config_content = f"""# Configuration for project: {project_name}
+services:
+  - id: {project_name}-main  # Service ID (used for default naming)
+    # container_name: "custom-name"  # Optional: Specify custom container name
+    # port_default: 8001             # Optional: Specify custom host port
+    group_id: "{project_name}"       # Graph group ID
+    entity_dir: "entities"           # Relative path to entity definitions within ai/graph
+    # environment:                   # Optional: Add non-secret env vars here
+    #   MY_FLAG: "true"
+"""
+    try:
+        config_path.write_text(config_content)
+        print(f"Created template {core.CYAN}{config_path}{core.NC}")
+    except OSError as e:
+        print(f"{core.RED}Error creating config file {config_path}: {e}{core.NC}")
+        sys.exit(1)
+
+    # Create entities directory within ai/graph
+    entities_dir = graph_dir / "entities"
+    try:
+        entities_dir.mkdir(exist_ok=True)
+        (entities_dir / ".gitkeep").touch(exist_ok=True)  # Create or update timestamp
+        print(f"Created entities directory: {core.CYAN}{entities_dir}{core.NC}")
+    except OSError as e:
+        print(f"{core.RED}Error creating entities directory {entities_dir}: {e}{core.NC}")
+        sys.exit(1)
+
+    # Set up rules
+    setup_rules(project_name, target_dir)  # Call the rules setup logic
+
+    # Update central registry
+    mcp_server_dir = core.get_mcp_server_dir()
+    registry_path = mcp_server_dir / "mcp-projects.yaml"
+    print(f"Updating central project registry: {core.CYAN}{registry_path}{core.NC}")
+    try:
+        # Ensure paths are absolute before passing
+        success = yaml_utils.update_registry_logic(
+            registry_file=registry_path,
+            project_name=project_name,
+            root_dir=target_dir.resolve(),
+            config_file=config_path.resolve(),
+            enabled=True
+        )
+        if not success:
+            print(f"{core.RED}Error: Failed to update project registry (see previous errors).{core.NC}")
+            sys.exit(1)
+    except Exception as e:
+        print(f"{core.RED}Error updating project registry: {e}{core.NC}")
+        sys.exit(1)
+
+    print(f"{core.GREEN}Graphiti project '{project_name}' initialization complete.{core.NC}")
+    print(f"You can now create entity definitions in: {core.CYAN}{entities_dir}{core.NC}")
+
+
+def setup_rules(project_name: str, target_dir: Path):
+    """
+    Set up Cursor rules for a project.
+    
+    Args:
+        project_name (str): Name of the project
+        target_dir (Path): Target directory for the project
+    """
+    print(f"Setting up Graphiti Cursor rules for project '{core.CYAN}{project_name}{core.NC}' in {core.CYAN}{target_dir}{core.NC}")
+    mcp_server_dir = core.get_mcp_server_dir()
+    rules_source_dir = mcp_server_dir / "rules"
+    templates_source_dir = rules_source_dir / "templates"
+    cursor_rules_dir = target_dir / ".cursor" / "rules" / "graphiti"
+
+    try:
+        cursor_rules_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Created/verified rules directory: {core.CYAN}{cursor_rules_dir}{core.NC}")
+
+        core_rule_src = rules_source_dir / "graphiti-mcp-core-rules.md"
+        maint_rule_src = rules_source_dir / "graphiti-knowledge-graph-maintenance.md"
+        schema_template_src = templates_source_dir / "project_schema_template.md"
+
+        core_rule_link = cursor_rules_dir / "graphiti-mcp-core-rules.mdc"
+        maint_rule_link = cursor_rules_dir / "graphiti-knowledge-graph-maintenance.mdc"
+        target_schema_file = cursor_rules_dir / f"graphiti-{project_name}-schema.mdc"
+
+        # Check source files
+        missing_files = []
+        if not core_rule_src.is_file(): missing_files.append(core_rule_src)
+        if not maint_rule_src.is_file(): missing_files.append(maint_rule_src)
+        if not schema_template_src.is_file(): missing_files.append(schema_template_src)
+        if missing_files:
+            print(f"{core.RED}Error: Source rule/template files not found:{core.NC}")
+            for f in missing_files: print(f"  - {f}")
+            sys.exit(1)
+
+        # Create/Update symlinks using relative paths for better portability
+        try:
+            core_rel_path = os.path.relpath(core_rule_src.resolve(), start=cursor_rules_dir.resolve())
+            maint_rel_path = os.path.relpath(maint_rule_src.resolve(), start=cursor_rules_dir.resolve())
+        except ValueError:
+            # Handle case where paths are on different drives (Windows) - fall back to absolute
+            print(f"{core.YELLOW}Warning: Cannot create relative symlink paths (different drives?). Using absolute paths.{core.NC}")
+            core_rel_path = core_rule_src.resolve()
+            maint_rel_path = maint_rule_src.resolve()
+
+        # Unlink if it exists and is not the correct link target
+        if core_rule_link.is_symlink():
+            if core_rule_link.readlink() != Path(core_rel_path):
+                core_rule_link.unlink()
+        elif core_rule_link.exists():  # It exists but isn't a symlink
+            core_rule_link.unlink()
+
+        if not core_rule_link.exists():
+            core_rule_link.symlink_to(core_rel_path)
+            print(f"Linking core rule: {core.CYAN}{core_rule_link.name}{core.NC} -> {core.CYAN}{core_rel_path}{core.NC}")
+        else:
+            print(f"Core rule link already exists: {core.CYAN}{core_rule_link.name}{core.NC}")
+
+        if maint_rule_link.is_symlink():
+            if maint_rule_link.readlink() != Path(maint_rel_path):
+                maint_rule_link.unlink()
+        elif maint_rule_link.exists():
+            maint_rule_link.unlink()
+
+        if not maint_rule_link.exists():
+            maint_rule_link.symlink_to(maint_rel_path)
+            print(f"Linking maintenance rule: {core.CYAN}{maint_rule_link.name}{core.NC} -> {core.CYAN}{maint_rel_path}{core.NC}")
+        else:
+            print(f"Maintenance rule link already exists: {core.CYAN}{maint_rule_link.name}{core.NC}")
+
+        # Generate schema file from template
+        if target_schema_file.exists():
+            print(f"{core.YELLOW}Warning: Project schema file already exists, skipping template generation: {target_schema_file}{core.NC}")
+        else:
+            print(f"Generating template project schema file: {core.CYAN}{target_schema_file}{core.NC}")
+            template_content = schema_template_src.read_text()
+            schema_content = template_content.replace("__PROJECT_NAME__", project_name)
+            target_schema_file.write_text(schema_content)
+
+        print(f"{core.GREEN}Graphiti Cursor rules setup complete for project '{project_name}'.{core.NC}")
+
+    except OSError as e:
+        print(f"{core.RED}Error setting up rules: {e}{core.NC}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"{core.RED}An unexpected error occurred during rule setup: {e}{core.NC}")
+        sys.exit(1)
+
+
+def _to_pascal_case(snake_str: str) -> str:
+    """
+    Converts snake_case or kebab-case to PascalCase.
+    
+    Args:
+        snake_str (str): String in snake_case or kebab-case
+        
+    Returns:
+        str: String in PascalCase
+    """
+    parts = re.split('_|-', snake_str)
+    return "".join(part.capitalize() for part in parts)
+
+
+def create_entity_set(entity_name: str, target_dir: Path):
+    """
+    Create a new entity file directly in a project's entities directory.
+    
+    Args:
+        entity_name (str): Name for the new entity type
+        target_dir (Path): Target project root directory
+    """
+    # Validate entity_name format
+    if not re.fullmatch(r'^[a-zA-Z0-9_-]+$', entity_name):
+        print(f"{core.RED}Error: Invalid entity name '{entity_name}'. Use only letters, numbers, underscores, and hyphens.{core.NC}")
+        sys.exit(1)
+        
+    # Load project configuration from ai/graph directory
+    graph_dir = target_dir / "ai" / "graph"
+    config_path = graph_dir / "mcp-config.yaml"
+    if not config_path.is_file():
+        print(f"{core.RED}Error: Project configuration file not found: {config_path}{core.NC}")
+        print(f"Make sure the project has been initialized with 'graphiti init' first.")
+        sys.exit(1)
+        
+    project_config = yaml_utils.load_yaml_file(config_path, safe=True)
+    if project_config is None:
+        print(f"{core.RED}Error: Failed to load project configuration from: {config_path}{core.NC}")
+        sys.exit(1)
+        
+    # Validate project config structure
+    if 'services' not in project_config or not isinstance(project_config['services'], list) or not project_config['services']:
+        print(f"{core.RED}Error: Invalid or missing 'services' section in project configuration: {config_path}{core.NC}")
+        sys.exit(1)
+        
+    # Extract the entity directory name from the first service entry
+    entity_dir_name = project_config.get('services', [{}])[0].get('entity_dir', 'entities')
+    
+    # Calculate paths - entities directory directly in graph_dir
+    project_entity_dir = graph_dir / entity_dir_name
+    
+    # Generate file name with the entity class name (without Entity suffix)
+    class_name = _to_pascal_case(entity_name)
+    entity_file_path = project_entity_dir / f"{class_name}.py"  # Name file after class
+    
+    # Check if the entity file already exists
+    if entity_file_path.exists():
+        print(f"{core.RED}Error: Entity file '{class_name}.py' already exists at: {entity_file_path}{core.NC}")
+        sys.exit(1)
+        
+    # Get path to template file from mcp_server
+    mcp_server_dir = core.get_mcp_server_dir()
+    example_template_path = mcp_server_dir / "entity_types" / "example" / "custom_entity_example.py"
+    
+    try:
+        # Create the project entity directory if it doesn't exist
+        project_entity_dir.mkdir(parents=True, exist_ok=True)
+
+        if not example_template_path.is_file():
+            print(f"{core.YELLOW}Warning: Template file not found: {example_template_path}{core.NC}")
+            print("Creating a minimal entity file instead.")
+            minimal_content = f"""from pydantic import BaseModel, Field
+
+class {class_name}(BaseModel):
+    \"\"\"Entity definition for '{entity_name}'.\"\"\"
+
+    example_field: str = Field(
+        ...,
+        description='An example field.',
+    )
+"""
+            entity_file_path.write_text(minimal_content)
+        else:
+            template_content = example_template_path.read_text()
+            # Perform replacements carefully
+            content = template_content.replace("class Product(BaseModel):", f"class {class_name}(BaseModel):")
+            # Replace descriptions, trying to be specific
+            content = content.replace("A Product represents", f"A {class_name} represents")
+            content = content.replace("about Products mentioned", f"about {class_name} entities mentioned")
+            content = content.replace("product names", f"{entity_name} names")
+            content = content.replace("the product belongs", f"the {entity_name} belongs")
+            content = content.replace("description of the product", f"description of the {entity_name}")
+            # Add more replacements if needed based on the template content
+
+            entity_file_path.write_text(content)
+        
+        print(f"Created entity file: {core.CYAN}{entity_file_path}{core.NC}")
+        print(f"{core.GREEN}Entity '{entity_name}' successfully created.{core.NC}")
+        print(f"You can now edit the entity definition in: {core.CYAN}{entity_file_path}{core.NC}")
+
+    except OSError as e:
+        print(f"{core.RED}Error creating entity '{entity_name}': {e}{core.NC}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"{core.RED}An unexpected error occurred creating entity '{entity_name}': {e}{core.NC}")
+        sys.exit(1)
+````
+
+## File: graphiti_cli/core.py
+````python
+#!/usr/bin/env python3
+"""
+Core utility functions for the Graphiti CLI tool.
+Contains path finding, subprocess execution, and common constants.
+"""
+import os
+import sys
+import subprocess
+from pathlib import Path
+from enum import Enum
+import shutil
+from typing import List, Optional, Union, Dict, Any
+
+# --- ANSI Color Constants ---
+# These match the original bash script for consistency
+RED = '\033[0;31m'
+GREEN = '\033[0;32m'
+YELLOW = '\033[0;33m'
+BLUE = '\033[0;34m'
+CYAN = '\033[0;36m'
+BOLD = '\033[1m'
+NC = '\033[0m'  # No Color
+
+# --- Constants ---
+DEFAULT_PORT_START = 8000
+DEFAULT_MCP_CONTAINER_PORT_VAR = "MCP_PORT"
+CONTAINER_ENTITY_PATH = "/app/entity_types"
+ENV_REPO_PATH = "MCP_GRAPHITI_REPO_PATH"
+
+# --- Enums ---
+class LogLevel(str, Enum):
+    """
+    Log levels for Docker Compose and container execution.
+    """
+    debug = "debug"
+    info = "info"
+    warn = "warn"
+    error = "error"
+    fatal = "fatal"
+    
+    def __str__(self) -> str:
+        return self.value
+
+# --- Path Finding Functions ---
+def _find_repo_root() -> Optional[Path]:
+    """
+    Internal function to find the repository root directory.
+    
+    The repository root is identified by the presence of:
+    - A mcp_server/ directory
+    - Within mcp_server/: entity_types/ directory
+    
+    Returns:
+        Optional[Path]: The absolute path to the repository root, or None if not found.
+    """
+    # First check environment variable
+    if ENV_REPO_PATH in os.environ:
+        repo_path = Path(os.environ[ENV_REPO_PATH])
+        if _validate_repo_path(repo_path):
+            return repo_path.resolve()
+        print(f"{YELLOW}Warning: {ENV_REPO_PATH} is set but points to invalid path: {repo_path}{NC}")
+    
+    # Try to find the repo root automatically based on script location
+    # Current script should be in mcp_server/graphiti_cli/core.py
+    current_file = Path(__file__).resolve()
+    if "mcp_server" in current_file.parts and "graphiti_cli" in current_file.parts:
+        # Go up to the 'mcp_server' parent, then one more level to reach repo root
+        potential_root = current_file.parents[2]  # Two levels up from core.py
+        if _validate_repo_path(potential_root):
+            return potential_root
+        
+    # Check current directory
+    current_dir = Path.cwd()
+    if _validate_repo_path(current_dir):
+        return current_dir
+    
+    # Check one level up
+    parent_dir = current_dir.parent
+    if _validate_repo_path(parent_dir):
+        return parent_dir
+    
+    return None
+
+def _validate_repo_path(path: Path) -> bool:
+    """
+    Validates that a given path is a valid repository root.
+    
+    Args:
+        path (Path): Path to validate
+        
+    Returns:
+        bool: True if the path is a valid repository root, False otherwise
+    """
+    if not path.is_dir():
+        return False
+    
+    # Check for essential directories
+    mcp_server_dir = path / "mcp_server"
+    entity_types_dir = mcp_server_dir / "entity_types"
+    
+    return mcp_server_dir.is_dir() and entity_types_dir.is_dir()
+
+def get_repo_root() -> Path:
+    """
+    Get the repository root directory, exiting if not found.
+    
+    Returns:
+        Path: The absolute path to the repository root
+    """
+    repo_root = _find_repo_root()
+    if repo_root is None:
+        print(f"{RED}Error: Could not find repository root.{NC}")
+        print(f"Please set the {CYAN}{ENV_REPO_PATH}{NC} environment variable to the root of your mcp-graphiti repository.")
+        print(f"Example: {YELLOW}export {ENV_REPO_PATH}=/path/to/mcp-graphiti{NC}")
+        sys.exit(1)
+    return repo_root
+
+def get_mcp_server_dir() -> Path:
+    """
+    Get the mcp_server directory path.
+    
+    Returns:
+        Path: The absolute path to the mcp_server directory
+    """
+    return get_repo_root() / "mcp_server"
+
+# --- Process Execution Functions ---
+def run_command(
+    cmd: List[str], 
+    check: bool = False, 
+    env: Optional[Dict[str, str]] = None,
+    cwd: Optional[Union[str, Path]] = None
+) -> subprocess.CompletedProcess:
+    """
+    Run a command in a subprocess with proper error handling.
+    Output is streamed to stdout/stderr by default.
+    
+    Args:
+        cmd (List[str]): Command and arguments as a list
+        check (bool): If True, check the return code and raise CalledProcessError if non-zero
+        env (Optional[Dict[str, str]]): Environment variables to set for the command
+        cwd (Optional[Union[str, Path]]): Directory to run the command in
+        
+    Returns:
+        subprocess.CompletedProcess: Result of the command
+    """
+    cmd_str = " ".join(cmd)
+    
+    # Use current environment and update with any provided environment variables
+    merged_env = os.environ.copy()
+    if env:
+        merged_env.update(env)
+    
+    try:
+        return subprocess.run(
+            cmd,
+            check=check,
+            env=merged_env,
+            cwd=cwd,
+            text=True,
+            capture_output=False  # Allow output to stream to terminal
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"{RED}Error: Command failed with exit code {e.returncode}:{NC}")
+        print(f"Command: {CYAN}{cmd_str}{NC}")
+        # Note: with capture_output=False, e.stdout and e.stderr will be None
+        # Error output will have been streamed directly to the terminal
+        if e.stdout:
+            print(f"{YELLOW}--- Command output ---{NC}")
+            print(e.stdout)
+        if e.stderr:
+            print(f"{RED}--- Command error ---{NC}")
+            print(e.stderr)
+        if check:
+            sys.exit(e.returncode)
+        raise
+    except Exception as e:
+        print(f"{RED}Error: Failed to execute command: {cmd_str}{NC}")
+        print(f"Error details: {e}")
+        if check:
+            sys.exit(1)
+        raise
+
+def run_docker_compose(
+    subcmd: List[str], 
+    log_level: str = LogLevel.info.value, 
+    detached: bool = False
+) -> None:
+    """
+    Run a docker compose command with consistent environment settings.
+    
+    Args:
+        subcmd (List[str]): Docker compose subcommand and arguments
+        log_level (str): Log level to set in environment
+        detached (bool): Whether to add the -d flag for detached mode
+    """
+    mcp_server_dir = get_mcp_server_dir()
+    
+    # Ensure the docker-compose.yml file exists
+    ensure_docker_compose_file()
+    
+    # Add -d flag if detached mode is requested
+    if detached and subcmd[0] in ["up", "restart"]:  # Add restart for consistency
+        subcmd.append("-d")
+    
+    # Prepare full command
+    cmd = ["docker", "compose"] + subcmd
+    
+    print(f"Running Docker Compose from: {CYAN}{mcp_server_dir}{NC}")
+    print(f"Command: {' '.join(cmd)}")
+    if log_level != LogLevel.info.value:
+        print(f"Log level: {CYAN}{log_level}{NC}")
+    
+    # Execute the command - Pass the log level as an environment variable
+    env = {"GRAPHITI_LOG_LEVEL": log_level}
+    run_command(cmd, check=True, env=env, cwd=mcp_server_dir)
+
+def ensure_docker_compose_file() -> None:
+    """
+    Ensure that the docker-compose.yml file exists by generating it if necessary.
+    """
+    mcp_server_dir = get_mcp_server_dir()
+    compose_file = mcp_server_dir / "docker-compose.yml"
+    
+    # Use our Python utility (to be implemented in yaml_utils.py) instead of the script
+    # Will be implemented after yaml_utils.py is created
+    from . import yaml_utils
+    try:
+        yaml_utils.generate_compose_logic(mcp_server_dir)  # Generate with default log level initially
+    except Exception as e:
+        print(f"{YELLOW}Continuing with existing file if it exists.{NC}")
+    
+    # Check if the file exists now
+    if not compose_file.exists():
+        print(f"{RED}Error: docker-compose.yml file does not exist and could not be generated.{NC}")
+        sys.exit(1)
+
+def ensure_dist_for_build() -> None:
+    """
+    Ensure that the dist directory is available for Docker build if needed.
+    
+    This function checks if the graphiti-core package is configured to use a local wheel.
+    If so, it ensures the dist directory exists and copies the wheel files.
+    """
+    repo_root = get_repo_root()
+    mcp_server_dir = get_mcp_server_dir()
+    
+    print(f"{BOLD}Checking build configuration...{NC}")
+    
+    # Check pyproject.toml to see if we're using local wheel
+    pyproject_path = mcp_server_dir / "pyproject.toml"
+    try:
+        with open(pyproject_path, 'r') as f:
+            pyproject_content = f.read()
+            
+        # Check if we're using local wheel and not published package
+        using_local_wheel = "graphiti-core @ file:///dist/" in pyproject_content
+        using_published = any(
+            line.strip().startswith("graphiti-core>=") 
+            for line in pyproject_content.splitlines()
+            if not line.strip().startswith('#')
+        )
+        
+        if not using_local_wheel or using_published:
+            print(f"{CYAN}Using published graphiti-core package. Skipping local wheel setup.{NC}")
+            return
+        
+        print(f"{CYAN}Local graphiti-core wheel configuration detected.{NC}")
+        
+        # Source and target paths
+        repo_dist = repo_root / "dist"
+        server_dist = mcp_server_dir / "dist"
+        
+        # Check if source dist exists
+        if not repo_dist.is_dir():
+            print(f"{RED}Error: dist directory not found at {repo_dist}{NC}")
+            print(f"Please build the graphiti-core wheel first.")
+            sys.exit(1)
+        
+        # Find wheel files
+        wheel_files = list(repo_dist.glob("*.whl"))
+        if not wheel_files:
+            print(f"{RED}Error: No wheel files found in {repo_dist}{NC}")
+            print(f"Please build the graphiti-core wheel first.")
+            sys.exit(1)
+        
+        # Create target directory if needed
+        server_dist.mkdir(exist_ok=True, parents=True)
+        
+        # Copy wheel files
+        print(f"Copying wheel files from {CYAN}{repo_dist}{NC} to {CYAN}{server_dist}{NC}")
+        for wheel_file in wheel_files:
+            shutil.copy2(wheel_file, server_dist)
+        
+        print(f"{GREEN}Dist directory prepared for Docker build.{NC}")
+    
+    except Exception as e:
+        print(f"{RED}Error checking build configuration: {e}{NC}")
+        print(f"{YELLOW}Please ensure your pyproject.toml is properly configured.{NC}")
+        sys.exit(1)
+````
+
+## File: graphiti_cli/main.py
+````python
+#!/usr/bin/env python3
+"""
+Main entry point for the Graphiti CLI tool.
+This module defines the Typer CLI application and command structure.
+"""
+import typer
+from pathlib import Path
+from typing_extensions import Annotated  # Preferred for Typer >= 0.9
+
+# Import command functions and core utilities
+from . import commands
+from .core import LogLevel, get_repo_root
+
+# Initialize Typer app
+app = typer.Typer(
+    help="CLI for managing Graphiti MCP Server projects and Docker environment.",
+    no_args_is_help=True,  # Show help if no command is given
+    rich_markup_mode="markdown"  # Nicer help text formatting
+)
+
+# --- Callback to ensure repo path is found early ---
+@app.callback()
+def main_callback(ctx: typer.Context):
+    """
+    Main callback to perform setup before any command runs.
+    Ensures the MCP_GRAPHITI_REPO_PATH is found.
+    """
+    # Ensure repo root is detected/set early.
+    # get_repo_root() will print messages and exit if not found.
+    _ = get_repo_root()
+
+
+# --- Define Commands (delegating to functions in commands.py) ---
+
+@app.command()
+def init(
+    project_name: Annotated[str, typer.Argument(help="Name of the target project.")],
+    target_dir: Annotated[Path, typer.Argument(
+        help="Target project root directory.",
+        exists=False,  # Allow creating the directory
+        file_okay=False,
+        dir_okay=True,
+        writable=True,
+        resolve_path=True  # Convert to absolute path
+    )] = Path(".")
+):
+    """
+    Initialize a project: create ai/graph structure with config, entities dir, and rules. ✨
+    """
+    commands.init_project(project_name, target_dir)
+
+@app.command()
+def entity(
+    set_name: Annotated[str, typer.Argument(help="Name for the new entity type set (e.g., 'my-entities').")],
+    target_dir: Annotated[Path, typer.Argument(
+        help="Target project root directory containing ai/graph/mcp-config.yaml.",
+        exists=True,  # Must exist for entity creation
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True
+    )] = Path(".")
+):
+    """
+    Create a new entity type set directory and template file within a project's ai/graph/entities directory. 📄
+    """
+    commands.create_entity_set(set_name, target_dir)
+
+@app.command()
+def rules(
+    project_name: Annotated[str, typer.Argument(help="Name of the target project for rule setup.")],
+    target_dir: Annotated[Path, typer.Argument(
+        help="Target project root directory.",
+        exists=True,  # Must exist for rules setup
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True
+    )] = Path(".")
+):
+    """
+    Setup/update Cursor rules symlinks and schema template for a project. 🔗
+    """
+    commands.setup_rules(project_name, target_dir)
+
+@app.command()
+def up(
+    detached: Annotated[bool, typer.Option("--detached", "-d", help="Run containers in detached mode.")] = False,
+    log_level: Annotated[LogLevel, typer.Option("--log-level", help="Set logging level for containers.", case_sensitive=False)] = LogLevel.info
+):
+    """
+    Start all containers using Docker Compose (builds first). 🚀
+    """
+    commands.docker_up(detached, log_level.value)
+
+@app.command()
+def down(
+    log_level: Annotated[LogLevel, typer.Option("--log-level", help="Set logging level for Docker Compose execution.", case_sensitive=False)] = LogLevel.info
+):
+    """
+    Stop and remove all containers using Docker Compose. 🛑
+    """
+    commands.docker_down(log_level.value)
+
+@app.command()
+def restart(
+    detached: Annotated[bool, typer.Option("--detached", "-d", help="Run 'up' in detached mode after 'down'.")] = False,
+    log_level: Annotated[LogLevel, typer.Option("--log-level", help="Set logging level for containers.", case_sensitive=False)] = LogLevel.info
+):
+    """
+    Restart all containers: runs 'down' then 'up'. 🔄
+    """
+    commands.docker_restart(detached, log_level.value)
+
+@app.command()
+def reload(
+    service_name: Annotated[str, typer.Argument(help="Name of the service to reload (e.g., 'mcp-test-project-1-main').")]
+):
+    """
+    Restart a specific running service container. ⚡
+    """
+    commands.docker_reload(service_name)
+
+@app.command()
+def compose():
+    """
+    Generate docker-compose.yml from base and project configs. ⚙️
+    """
+    commands.docker_compose_generate()
+
+
+# Allow running the script directly for development/testing
+if __name__ == "__main__":
+    app()
+````
+
+## File: graphiti_cli/yaml_utils.py
+````python
+#!/usr/bin/env python3
+"""
+YAML utility functions for the Graphiti CLI.
+Contains functions for loading/saving YAML files, updating the registry,
+and generating the Docker Compose configuration.
+"""
+import sys
+from pathlib import Path
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
+import os
+from typing import Optional, List, Dict, Any
+
+from .core import get_mcp_server_dir, CONTAINER_ENTITY_PATH, DEFAULT_PORT_START, DEFAULT_MCP_CONTAINER_PORT_VAR, RED, GREEN, YELLOW, CYAN, NC
+from .core import LogLevel
+
+# Define the distinct path for project-specific entities inside the container
+PROJECT_CONTAINER_ENTITY_PATH = "/app/project_entities"
+
+# --- File and Path Constants ---
+BASE_COMPOSE_FILENAME = "base-compose.yaml"
+PROJECTS_REGISTRY_FILENAME = "mcp-projects.yaml"
+DOCKER_COMPOSE_OUTPUT_FILENAME = "docker-compose.yml"
+
+# --- YAML Key Constants ---
+# Registry file keys
+REGISTRY_PROJECTS_KEY = "projects"
+REGISTRY_ROOT_DIR_KEY = "root_dir"
+REGISTRY_CONFIG_FILE_KEY = "config_file"
+REGISTRY_ENABLED_KEY = "enabled"
+
+# Compose file keys
+COMPOSE_SERVICES_KEY = "services"
+COMPOSE_CUSTOM_BASE_ANCHOR_KEY = "x-graphiti-mcp-custom-base"
+COMPOSE_CONTAINER_NAME_KEY = "container_name"
+COMPOSE_PORTS_KEY = "ports"
+COMPOSE_ENVIRONMENT_KEY = "environment"
+COMPOSE_VOLUMES_KEY = "volumes"
+
+# Project config keys
+PROJECT_SERVICES_KEY = "services"
+PROJECT_SERVER_ID_KEY = "id"
+PROJECT_ENTITY_DIR_KEY = "entity_dir"
+PROJECT_CONTAINER_NAME_KEY = "container_name"
+PROJECT_PORT_DEFAULT_KEY = "port_default"
+PROJECT_GROUP_ID_KEY = "group_id"
+PROJECT_ENVIRONMENT_KEY = "environment"
+
+# --- Environment Variable Constants ---
+ENV_MCP_GROUP_ID = "MCP_GROUP_ID"
+ENV_MCP_USE_CUSTOM_ENTITIES = "MCP_USE_CUSTOM_ENTITIES"
+ENV_MCP_USE_CUSTOM_ENTITIES_VALUE = "true"
+ENV_MCP_ENTITY_TYPE_DIR = "MCP_ENTITY_TYPE_DIR"
+
+# --- Other Constants ---
+SERVICE_NAME_PREFIX = "mcp-"
+
+# --- YAML Instances ---
+yaml_rt = YAML()  # Round-Trip for preserving structure/comments
+yaml_rt.preserve_quotes = True
+yaml_rt.indent(mapping=2, sequence=4, offset=2)
+
+yaml_safe = YAML(typ='safe')  # Safe loader for reading untrusted/simple config
+
+# --- File Handling ---
+def load_yaml_file(file_path: Path, safe: bool = False) -> Optional[Any]:
+    """
+    Loads a YAML file, handling errors.
+    
+    Args:
+        file_path (Path): Path to the YAML file
+        safe (bool): Whether to use the safe loader (True) or round-trip loader (False)
+        
+    Returns:
+        Optional[Any]: The parsed YAML data, or None if loading failed
+    """
+    yaml_loader = yaml_safe if safe else yaml_rt
+    if not file_path.is_file():
+        print(f"Warning: YAML file not found or is not a file: {file_path}")
+        return None
+    try:
+        with file_path.open('r') as f:
+            return yaml_loader.load(f)
+    except Exception as e:
+        print(f"Error parsing YAML file '{file_path}': {e}")
+        return None  # Or raise specific exception
+
+def write_yaml_file(data: Any, file_path: Path, header: Optional[List[str]] = None):
+    """
+    Writes data to a YAML file using round-trip dumper.
+    
+    Args:
+        data (Any): The data to write to the file
+        file_path (Path): Path to the output file
+        header (Optional[List[str]]): Optional list of comment lines to add at the top of the file
+    
+    Raises:
+        IOError: If the file cannot be written
+        Exception: For other errors
+    """
+    try:
+        # Ensure parent directory exists
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with file_path.open('w') as f:
+            if header:
+                f.write("\n".join(header) + "\n\n")  # Add extra newline
+            yaml_rt.dump(data, f)
+    except IOError as e:
+        print(f"Error writing YAML file '{file_path}': {e}")
+        raise  # Re-raise after printing
+    except Exception as e:
+        print(f"An unexpected error occurred during YAML dumping to '{file_path}': {e}")
+        raise
+
+# --- Logic from _yaml_helper.py ---
+def update_registry_logic(
+    registry_file: Path,
+    project_name: str,
+    root_dir: Path,  # Expecting resolved absolute path
+    config_file: Path,  # Expecting resolved absolute path
+    enabled: bool = True
+) -> bool:
+    """
+    Updates the central project registry file (mcp-projects.yaml).
+    Corresponds to the logic in the old _yaml_helper.py.
+    
+    Args:
+        registry_file (Path): Path to the registry file
+        project_name (str): Name of the project
+        root_dir (Path): Absolute path to the project root directory
+        config_file (Path): Absolute path to the project config file
+        enabled (bool): Whether the project should be enabled
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    print(f"Updating registry '{registry_file}' for project '{project_name}'")
+    if not root_dir.is_absolute() or not config_file.is_absolute():
+        print("Error: Project root_dir and config_file must be absolute paths.")
+        return False
+
+    if not config_file.exists():
+        print(f"Warning: Project config file '{config_file}' does not exist.")
+        # Allow continuing for init scenarios
+
+    # Create registry file with header if it doesn't exist
+    if not registry_file.exists():
+        print(f"Creating new registry file: {registry_file}")
+        header = [
+            "# !! WARNING: This file is managed by the 'graphiti init' command. !!",
+            "# !! Avoid manual edits unless absolutely necessary.                 !!",
+            "#",
+            "# Maps project names to their configuration details.",
+            "# Paths should be absolute for reliability.",
+        ]
+        initial_data = CommentedMap({REGISTRY_PROJECTS_KEY: CommentedMap()})
+        try:
+            write_yaml_file(initial_data, registry_file, header=header)
+        except Exception:
+            return False  # Error handled in write_yaml_file
+
+    # Load existing registry data using round-trip loader
+    data = load_yaml_file(registry_file, safe=False)
+    if data is None:
+        print(f"Error: Could not load registry file {registry_file}")
+        return False
+
+    if not isinstance(data, dict) or REGISTRY_PROJECTS_KEY not in data:
+        print(f"Error: Invalid registry file format in {registry_file}. Missing '{REGISTRY_PROJECTS_KEY}' key.")
+        return False
+
+    # Ensure 'projects' key exists and is a map
+    if data.get(REGISTRY_PROJECTS_KEY) is None:
+        data[REGISTRY_PROJECTS_KEY] = CommentedMap()
+    elif not isinstance(data[REGISTRY_PROJECTS_KEY], dict):
+        print(f"Error: '{REGISTRY_PROJECTS_KEY}' key in {registry_file} is not a dictionary.")
+        return False
+
+    # Add or update the project entry (convert Paths to strings for YAML)
+    project_entry = CommentedMap({
+        REGISTRY_ROOT_DIR_KEY: str(root_dir),
+        REGISTRY_CONFIG_FILE_KEY: str(config_file),
+        REGISTRY_ENABLED_KEY: enabled
+    })
+    data[REGISTRY_PROJECTS_KEY][project_name] = project_entry
+
+    # Write back to the registry file
+    try:
+        # Preserve header by reading first few lines if necessary (complex)
+        # Simpler: Assume header is managed manually or re-added if file recreated.
+        # We rewrite the whole file here.
+        write_yaml_file(data, registry_file)
+        print(f"Successfully updated registry for project '{project_name}'")
+        return True
+    except Exception:
+        return False  # Error handled in write_yaml_file
+
+# --- Logic from generate_compose.py ---
+def generate_compose_logic(
+    mcp_server_dir: Path
+):
+    """
+    Generates the final docker-compose.yml by merging base and project configs.
+    Corresponds to the logic in the old generate_compose.py.
+    
+    Args:
+        mcp_server_dir (Path): Path to the mcp_server directory
+    """
+    print("Generating docker-compose.yml...")
+    base_compose_path = mcp_server_dir / BASE_COMPOSE_FILENAME
+    projects_registry_path = mcp_server_dir / PROJECTS_REGISTRY_FILENAME
+    output_compose_path = mcp_server_dir / DOCKER_COMPOSE_OUTPUT_FILENAME
+
+    # Load base compose file
+    compose_data = load_yaml_file(base_compose_path, safe=False)
+    if compose_data is None or not isinstance(compose_data, dict):
+        print(f"Error: Failed to load or parse base compose file: {base_compose_path}")
+        sys.exit(1)
+
+    if COMPOSE_SERVICES_KEY not in compose_data or not isinstance(compose_data.get(COMPOSE_SERVICES_KEY), dict):
+        print(f"Error: Invalid structure in '{base_compose_path}'. Missing '{COMPOSE_SERVICES_KEY}' dictionary.")
+        sys.exit(1)
+
+    # Load project registry safely
+    projects_registry = load_yaml_file(projects_registry_path, safe=True)
+    if projects_registry is None:
+        print(f"Warning: Project registry file '{projects_registry_path}' not found or failed to parse. No custom services will be added.")
+        projects_registry = {REGISTRY_PROJECTS_KEY: {}}
+    elif REGISTRY_PROJECTS_KEY not in projects_registry or not isinstance(projects_registry[REGISTRY_PROJECTS_KEY], dict):
+        print(f"Warning: Invalid format or missing '{REGISTRY_PROJECTS_KEY}' key in '{projects_registry_path}'. No custom services will be added.")
+        projects_registry = {REGISTRY_PROJECTS_KEY: {}}
+
+    # --- Generate Custom Service Definitions ---
+    services_map = compose_data[COMPOSE_SERVICES_KEY]  # Should be CommentedMap
+
+    # Find the anchor object for merging
+    custom_base_anchor_obj = compose_data.get(COMPOSE_CUSTOM_BASE_ANCHOR_KEY)
+    if not custom_base_anchor_obj:
+        print(f"{RED}Error: Could not find '{COMPOSE_CUSTOM_BASE_ANCHOR_KEY}' definition in {base_compose_path}.{NC}")
+        sys.exit(1)
+
+    overall_service_index = 0
+    # Iterate through projects from the registry
+    for project_name, project_data in projects_registry.get(REGISTRY_PROJECTS_KEY, {}).items():
+        if not isinstance(project_data, dict) or not project_data.get(REGISTRY_ENABLED_KEY, False):
+            continue  # Skip disabled or invalid projects
+
+        project_config_path_str = project_data.get(REGISTRY_CONFIG_FILE_KEY)
+        project_root_dir_str = project_data.get(REGISTRY_ROOT_DIR_KEY)
+
+        if not project_config_path_str or not project_root_dir_str:
+            print(f"Warning: Skipping project '{project_name}' due to missing '{REGISTRY_CONFIG_FILE_KEY}' or '{REGISTRY_ROOT_DIR_KEY}'.")
+            continue
+
+        project_config_path = Path(project_config_path_str)
+        project_root_dir = Path(project_root_dir_str)
+
+        # Load the project's specific mcp-config.yaml
+        project_config = load_yaml_file(project_config_path, safe=True)
+        if project_config is None:
+            print(f"Warning: Skipping project '{project_name}' because config file '{project_config_path}' could not be loaded.")
+            continue
+
+        if PROJECT_SERVICES_KEY not in project_config or not isinstance(project_config[PROJECT_SERVICES_KEY], list):
+            print(f"Warning: Skipping project '{project_name}' due to missing or invalid '{PROJECT_SERVICES_KEY}' list in '{project_config_path}'.")
+            continue
+
+        # Iterate through services defined in the project's config
+        for server_conf in project_config[PROJECT_SERVICES_KEY]:
+            if not isinstance(server_conf, dict):
+                print(f"Warning: Skipping invalid service entry in '{project_config_path}': {server_conf}")
+                continue
+
+            server_id = server_conf.get(PROJECT_SERVER_ID_KEY)
+            entity_type_dir = server_conf.get(PROJECT_ENTITY_DIR_KEY)  # Relative path within project
+
+            if not server_id or not entity_type_dir:
+                print(f"Warning: Skipping service in '{project_name}' due to missing '{PROJECT_SERVER_ID_KEY}' or '{PROJECT_ENTITY_DIR_KEY}': {server_conf}")
+                continue
+
+            # --- Determine Service Configuration ---
+            service_name = f"{SERVICE_NAME_PREFIX}{server_id}"
+            container_name = server_conf.get(PROJECT_CONTAINER_NAME_KEY, service_name)  # Default to service_name
+            port_default = server_conf.get(PROJECT_PORT_DEFAULT_KEY, DEFAULT_PORT_START + overall_service_index + 1)
+            port_mapping = f"{port_default}:${{{DEFAULT_MCP_CONTAINER_PORT_VAR}}}"  # Use f-string
+
+            # --- Build Service Definition using CommentedMap ---
+            new_service = CommentedMap()
+            # Add the merge key first using the anchor object
+            new_service.add_yaml_merge([(0, custom_base_anchor_obj)])  # Merge base config
+
+            new_service[COMPOSE_CONTAINER_NAME_KEY] = container_name
+            new_service[COMPOSE_PORTS_KEY] = [port_mapping]  # Ports must be a list
+
+            # --- Environment Variables ---
+            env_vars = CommentedMap()  # Use CommentedMap to preserve order if needed
+            mcp_group_id = server_conf.get(PROJECT_GROUP_ID_KEY, project_name)  # Default group_id to project_name
+            env_vars[ENV_MCP_GROUP_ID] = mcp_group_id
+            env_vars[ENV_MCP_USE_CUSTOM_ENTITIES] = ENV_MCP_USE_CUSTOM_ENTITIES_VALUE  # Assume true if defined here
+
+            # Calculate absolute host path for entity volume mount
+            abs_host_entity_path = (project_root_dir / entity_type_dir).resolve()
+            if not abs_host_entity_path.is_dir():
+                print(f"Warning: Entity directory '{abs_host_entity_path}' for service '{service_name}' does not exist. Volume mount might fail.")
+                # Continue anyway, Docker will create an empty dir inside container if host path doesn't exist
+
+            # Set container path for entity directory env var
+            env_vars[ENV_MCP_ENTITY_TYPE_DIR] = PROJECT_CONTAINER_ENTITY_PATH
+
+            # Add project-specific environment variables from mcp-config.yaml
+            project_environment = server_conf.get(PROJECT_ENVIRONMENT_KEY, {})
+            if isinstance(project_environment, dict):
+                env_vars.update(project_environment)
+            else:
+                print(f"Warning: Invalid '{PROJECT_ENVIRONMENT_KEY}' section for service '{service_name}' in '{project_config_path}'. Expected a dictionary.")
+
+            new_service[COMPOSE_ENVIRONMENT_KEY] = env_vars
+
+            # --- Volumes ---
+            # Ensure volumes list exists (might be added by anchor merge, check needed?)
+            # setdefault is safer if anchor doesn't guarantee 'volumes'
+            if COMPOSE_VOLUMES_KEY not in new_service:
+                new_service[COMPOSE_VOLUMES_KEY] = []
+            elif not isinstance(new_service[COMPOSE_VOLUMES_KEY], list):
+                print(f"Warning: '{COMPOSE_VOLUMES_KEY}' merged from anchor for service '{service_name}' is not a list. Overwriting.")
+                new_service[COMPOSE_VOLUMES_KEY] = []
+
+            # Append the entity volume mount (read-only)
+            new_service[COMPOSE_VOLUMES_KEY].append(f"{abs_host_entity_path}:{PROJECT_CONTAINER_ENTITY_PATH}:ro")
+
+            # --- Add to Services Map ---
+            services_map[service_name] = new_service
+            overall_service_index += 1
+
+    # --- Write Output File ---
+    header = [
+        "# Generated by graphiti CLI",
+        "# Do not edit this file directly. Modify base-compose.yaml or project-specific mcp-config.yaml files instead.",
+        "",
+        "# --- Custom MCP Services Info ---",
+        f"# Default Ports: Assigned sequentially starting from {DEFAULT_PORT_START + 1}",
+        "#              Can be overridden by specifying 'port_default' in project's mcp-config.yaml.",
+    ]
+    try:
+        write_yaml_file(compose_data, output_compose_path, header=header)
+        print(f"Successfully generated '{output_compose_path}'.")
+    except Exception:
+        # Error already printed by write_yaml_file
+        sys.exit(1)
+````
+
+## File: mcp_server.egg-info/dependency_links.txt
+````
+
+````
+
+## File: mcp_server.egg-info/entry_points.txt
+````
+[console_scripts]
+graphiti = graphiti_cli.main:app
+````
+
+## File: mcp_server.egg-info/PKG-INFO
+````
+Metadata-Version: 2.4
+Name: mcp-server
+Version: 0.1.0
+Summary: Graphiti MCP Server
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: mcp>=1.5.0
+Requires-Dist: openai>=1.68.2
+Requires-Dist: graphiti-core>=0.8.5
+Requires-Dist: ruamel.yaml>=0.17.21
+Requires-Dist: typer[all]>=0.9.0
+Requires-Dist: python-dotenv>=1.0.0
+
+# Graphiti MCP Server
+
+Graphiti is a framework for building and querying temporally-aware knowledge graphs, specifically tailored for AI agents operating in dynamic environments. Unlike traditional retrieval-augmented generation (RAG) methods, Graphiti continuously integrates user interactions, structured and unstructured enterprise data, and external information into a coherent, queryable graph. The framework supports incremental data updates, efficient retrieval, and precise historical queries without requiring complete graph recomputation, making it suitable for developing interactive, context-aware AI applications.
+
+This is an experimental Model Context Protocol (MCP) server implementation for Graphiti. The MCP server exposes Graphiti's key functionality through the MCP protocol, allowing AI assistants to interact with Graphiti's knowledge graph capabilities.
+
+## Features
+
+The Graphiti MCP server exposes the following key high-level functions of Graphiti:
+
+- **Episode Management**: Add, retrieve, and delete episodes (text, messages, or JSON data)
+- **Entity Management**: Search and manage entity nodes and relationships in the knowledge graph
+- **Search Capabilities**: Search for facts (edges) and node summaries using semantic and hybrid search
+- **Group Management**: Organize and manage groups of related data with group_id filtering
+- **Graph Maintenance**: Clear the graph and rebuild indices
+
+## Installation
+
+### Prerequisites
+
+1. Ensure you have Python 3.10 or higher installed.
+2. A running Neo4j database (version 5.26 or later required)
+3. OpenAI API key for LLM operations
+
+### Setup
+
+1. Clone the repository and navigate to the mcp_server directory
+2. Use `uv` to create a virtual environment and install dependencies:
+
+```bash
+# Install uv if you don't have it already
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create a virtual environment and install dependencies in one step
+uv sync
 ```
 
+## Configuration
+
+The server uses the following environment variables:
+
+- `NEO4J_URI`: URI for the Neo4j database (default: `bolt://localhost:7687`)
+- `NEO4J_USER`: Neo4j username (default: `neo4j`)
+- `NEO4J_PASSWORD`: Neo4j password (default: `demodemo`)
+- `OPENAI_API_KEY`: OpenAI API key (required for LLM operations)
+- `OPENAI_BASE_URL`: Optional base URL for OpenAI API
+- `MODEL_NAME`: Optional model name to use for LLM inference
+
+You can set these variables in a `.env` file in the project directory.
+
+## Running the Server
+
+To run the Graphiti MCP server directly using `uv`:
+
+```bash
+uv run graphiti_mcp_server.py
+```
+
+With options:
+
+```bash
+uv run graphiti_mcp_server.py --model gpt-4o --transport sse
+```
+
+Available arguments:
+
+- `--model`: Specify the model name to use with the LLM client
+- `--transport`: Choose the transport method (sse or stdio, default: sse)
+- `--group-id`: Set a namespace for the graph (optional)
+- `--destroy-graph`: Destroy all Graphiti graphs (use with caution)
+- `--use-custom-entities`: Enable entity extraction using the predefined ENTITY_TYPES
+
+## Docker Deployment
+
+The Graphiti MCP server can be deployed using Docker. The Dockerfile uses `uv` for package management, ensuring consistent dependency installation.
+
+### Environment Configuration
+
+Before running the Docker Compose setup, you need to configure the environment variables. You have two options:
+
+1. **Using a .env file** (recommended):
+
+   - Copy the provided `.env.example` file to create a `.env` file:
+     ```bash
+     cp .env.example .env
+     ```
+   - Edit the `.env` file to set your OpenAI API key and other configuration options:
+     ```
+     # Required for LLM operations
+     OPENAI_API_KEY=your_openai_api_key_here
+     MODEL_NAME=gpt-4o
+     # Optional: OPENAI_BASE_URL only needed for non-standard OpenAI endpoints
+     # OPENAI_BASE_URL=https://api.openai.com/v1
+     ```
+   - The Docker Compose setup is configured to use this file if it exists (it's optional)
+
+2. **Using environment variables directly**:
+   - You can also set the environment variables when running the Docker Compose command:
+     ```bash
+     OPENAI_API_KEY=your_key MODEL_NAME=gpt-4o docker compose up
+     ```
+
+### Neo4j Configuration
+
+The Docker Compose setup includes a Neo4j container with the following default configuration:
+
+- Username: `neo4j`
+- Password: `demodemo`
+- URI: `bolt://neo4j:7687` (from within the Docker network)
+- Memory settings optimized for development use
+
+## Project-Based Architecture
+
+The Graphiti MCP server uses a centralized, project-based architecture that allows different projects to define their own custom MCP servers while sharing a single Neo4j instance and core server.
+
+### Project Configuration
+
+Each project defines its custom MCP server configuration in an `mcp-config.yaml` file:
+
+```yaml
+# Configuration for project: project-name
+services:
+  - id: project-main         # Service ID (used for default naming)
+    # container_name: "custom-name" # Optional: Specify custom container name
+    # port_default: 8001           # Optional: Specify custom host port
+    group_id: "project-name"     # Graph group ID
+    entity_dir: "entities"       # Relative path to entity definitions within project
+    # environment:                 # Optional: Add non-secret env vars here
+    #   MY_FLAG: "true"
+```
+
+### Central Registry
+
+All projects are registered in a central `mcp-projects.yaml` file in the `mcp-server` repository:
+
+```yaml
+# Maps project names to their configuration details
+projects:
+  project-name:
+    config_file: /absolute/path/to/project-name/mcp-config.yaml
+    root_dir: /absolute/path/to/project-name
+    enabled: true
+```
+
+### Docker Compose Generation
+
+The system automatically generates a `docker-compose.yml` file based on:
+- A base configuration (`base-compose.yaml`)
+- All enabled projects in the central registry
+
+This allows multiple projects to share a single Neo4j instance and core MCP server while maintaining isolation between different projects' entity types and data.
+
+### Project Setup
+
+To set up a new project:
+
+```bash
+cd /path/to/your/project
+/path/to/mcp-server/scripts/graphiti init project-name .
+```
+
+This will:
+1. Create a template `mcp-config.yaml` in your project directory
+2. Create an `entities/` directory for your custom entity definitions
+3. Register your project in the central `mcp-projects.yaml` with absolute paths
+4. Set up cursor rules in your project
+
+### Running Services
+
+All services are managed centrally from the `mcp-server` directory:
+
+```bash
+cd /path/to/mcp-server
+./scripts/graphiti compose   # Generate the docker-compose.yml
+./scripts/graphiti up -d     # Start all services
+./scripts/graphiti down      # Stop all services
+./scripts/graphiti restart   # Restart all services
+```
+
+### Running Services
+
+To run the Graphiti MCP server with Docker Compose:
+
+```bash
+docker compose up
+```
+
+Or if you're using an older version of Docker Compose:
+
+```bash
+docker-compose up
+```
+
+This will start both the Neo4j database and the Graphiti MCP server. The Docker setup:
+
+- Uses `uv` for package management and running the server
+- Installs dependencies from the `pyproject.toml` file
+- Connects to the Neo4j container using the environment variables
+- Exposes the server on port 8000 for HTTP-based SSE transport
+- Includes a healthcheck for Neo4j to ensure it's fully operational before starting the MCP server
+
+## Integrating with MCP Clients
+
+### Configuration
+
+To use the Graphiti MCP server with an MCP-compatible client, configure it to connect to the server:
+
+```json
+{
+  "mcpServers": {
+    "graphiti": {
+      "transport": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "/ABSOLUTE/PATH/TO/graphiti_mcp_server.py",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "NEO4J_URI": "bolt://localhost:7687",
+        "NEO4J_USER": "neo4j",
+        "NEO4J_PASSWORD": "demodemo",
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "MODEL_NAME": "gpt-4o"
+      }
+    }
+  }
+}
+```
+
+For SSE transport (HTTP-based), you can use this configuration:
+
+```json
+{
+  "mcpServers": {
+    "graphiti": {
+      "transport": "sse",
+      "url": "http://localhost:8000/sse"
+    }
+  }
+}
+```
+
+Or start the server with uv and connect to it:
+
+```json
+{
+  "mcpServers": {
+    "graphiti": {
+      "command": "uv",
+      "args": [
+        "run",
+        "/ABSOLUTE/PATH/TO/graphiti_mcp_server.py",
+        "--transport",
+        "sse"
+      ],
+      "env": {
+        "NEO4J_URI": "bolt://localhost:7687",
+        "NEO4J_USER": "neo4j",
+        "NEO4J_PASSWORD": "demodemo",
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "MODEL_NAME": "gpt-4o"
+      }
+    }
+  }
+}
+```
+
+## Available Tools
+
+The Graphiti MCP server exposes the following tools:
+
+- `add_episode`: Add an episode to the knowledge graph (supports text, JSON, and message formats)
+- `search_nodes`: Search the knowledge graph for relevant node summaries
+- `search_facts`: Search the knowledge graph for relevant facts (edges between entities)
+- `delete_entity_edge`: Delete an entity edge from the knowledge graph
+- `delete_episode`: Delete an episode from the knowledge graph
+- `get_entity_edge`: Get an entity edge by its UUID
+- `get_episodes`: Get the most recent episodes for a specific group
+- `clear_graph`: Clear all data from the knowledge graph and rebuild indices
+- `get_status`: Get the status of the Graphiti MCP server and Neo4j connection
+
+For detailed usage instructions, known issues, and best practices, see the [MCP Tools Usage Guide](./docs/MCP_TOOLS_USAGE.md).
+
+## Working with JSON Data
+
+The Graphiti MCP server can process structured JSON data through the `add_episode` tool with `source="json"`. This allows you to automatically extract entities and relationships from structured data:
+
+```
+add_episode(
+    name="Customer Profile",
+    episode_body="{\"company\": {\"name\": \"Acme Technologies\"}, \"products\": [{\"id\": \"P001\", \"name\": \"CloudSync\"}, {\"id\": \"P002\", \"name\": \"DataMiner\"}]}",
+    source="json",
+    source_description="CRM data"
+)
+```
+
+## Integrating with the Cursor IDE
+
+To integrate the Graphiti MCP Server with the Cursor IDE, follow these steps:
+
+1. Run the Graphiti MCP server using the SSE transport:
+
+```bash
+python graphiti_mcp_server.py --transport sse --use-custom-entities --group-id <your_group_id>
+```
+
+Hint: specify a `group_id` to retain prior graph data. If you do not specify a `group_id`, the server will create a new graph
+
+2. Configure Cursor to connect to the Graphiti MCP server.
+
+```json
+{
+  "mcpServers": {
+    "Graphiti": {
+      "url": "http://localhost:8000/sse"
+    }
+  }
+}
+```
+
+3. Add the Graphiti rules to Cursor's User Rules. See [cursor_rules.md](cursor_rules.md) for details.
+
+4. Kick off an agent session in Cursor.
+
+The integration enables AI assistants in Cursor to maintain persistent memory through Graphiti's knowledge graph capabilities.
+
+## Requirements
+
+- Python 3.10 or higher
+- Neo4j database (version 5.26 or later required)
+- OpenAI API key (for LLM operations and embeddings)
+- MCP-compatible client
+
+## License
+
+This project is licensed under the same license as the Graphiti project.
+````
+
+## File: mcp_server.egg-info/requires.txt
+````
+mcp>=1.5.0
+openai>=1.68.2
+graphiti-core>=0.8.5
+ruamel.yaml>=0.17.21
+typer[all]>=0.9.0
+python-dotenv>=1.0.0
+````
+
+## File: mcp_server.egg-info/SOURCES.txt
+````
+README.md
+pyproject.toml
+graphiti_cli/__init__.py
+graphiti_cli/commands.py
+graphiti_cli/core.py
+graphiti_cli/main.py
+graphiti_cli/yaml_utils.py
+mcp_server.egg-info/PKG-INFO
+mcp_server.egg-info/SOURCES.txt
+mcp_server.egg-info/dependency_links.txt
+mcp_server.egg-info/entry_points.txt
+mcp_server.egg-info/requires.txt
+mcp_server.egg-info/top_level.txt
+````
+
+## File: mcp_server.egg-info/top_level.txt
+````
+graphiti_cli
+````
+
 ## File: rules/examples/graphiti-example-schema.md
-```markdown
+````markdown
 ---
 description: Use this rule when working specifically within the 'example' project context to understand its unique entities (Product, Company), relationships (PRODUCES), and extraction guidelines.
 globs: mcp_server/entity_types/example/*.py
@@ -1245,10 +3790,10 @@ These guidelines supplement or specialize the instructions within the entity def
 ## 4. Future Evolution
 
 This schema may be expanded to include other entities (e.g., `Customer`, `Review`) and relationships (e.g., `SELLS`, `REVIEWS`) as the project needs evolve. Follow the process in `@graphiti-knowledge-graph-maintenance.md` to propose changes.
-```
+````
 
 ## File: rules/templates/project_schema_template.md
-```markdown
+````markdown
 ---
 description: Use this rule when working specifically within the '__PROJECT_NAME__' project context to understand its unique entities, relationships, and extraction guidelines.
 globs: # Add relevant globs for your project files, e.g., src/**/*.py
@@ -1305,10 +3850,10 @@ Example:
 ## 4. Future Evolution
 
 *Briefly mention potential future directions or areas for schema expansion.*
-```
+````
 
 ## File: rules/graphiti-knowledge-graph-maintenance.md
-```markdown
+````markdown
 ---
 description: Use this rule when you need to propose changes (additions, modifications) to a project's specific knowledge graph schema file (`graphiti-[project-name]-schema.md`).
 globs: 
@@ -1378,10 +3923,10 @@ Project knowledge schemas are expected to evolve. If you identify a need for a *
 - Mention any potential conflicts or considerations in your justification if significant.
 
 **Remember:** Maintaining an accurate and consistent project schema is crucial for reliable knowledge management and effective AI assistance within the project context.
-```
+````
 
 ## File: rules/graphiti-mcp-core-rules.md
-```markdown
+````markdown
 ---
 description: Use this rule first for general guidance on using Graphiti MCP server tools (entity extraction, memory). It explains the overall rule structure and links to project-specific schemas and maintenance procedures.
 globs: 
@@ -1499,948 +4044,10 @@ Maintaining a knowledge graph requires diligence. The goal is not just to store 
     *   **Maintenance & Validation:** Regularly assess the graph's accuracy and usefulness. Ensure data validity and consistency. Schemas evolve, so plan for iteration. ([Source: stardog.com](mdc:https:/www.stardog.com/building-a-knowledge-graph))
 
 Use the specific rules defined in `@graphiti-knowledge-graph-maintenance.md` when proposing changes to project schemas.
-```
-
-## File: scripts/_yaml_helper.py
-```python
-#!/usr/bin/env python3
-"""
-YAML Helper for Graphiti MCP Server
-
-This script provides utilities to manage the mcp-projects.yaml registry file.
-It preserves comments and formatting while updating the YAML content.
-"""
-
-import argparse
-import os
-import sys
-from pathlib import Path
-from typing import Dict, Any, Optional
-
-# Use ruamel.yaml for round-trip parsing
-from ruamel.yaml import YAML
-
-
-def update_registry(
-    registry_file: str,
-    project_name: str,
-    root_dir: str,
-    config_file: str,
-    enabled: bool = True
-) -> bool:
-    """
-    Update the central project registry file with a project entry.
-    
-    Args:
-        registry_file: Path to the registry file (mcp-projects.yaml)
-        project_name: Name of the project
-        root_dir: Absolute path to the project's root directory
-        config_file: Absolute path to the project's config file
-        enabled: Whether the project should be enabled
-    
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    try:
-        # Check if paths are absolute
-        if not os.path.isabs(root_dir):
-            print(f"Error: Project root directory '{root_dir}' must be an absolute path")
-            return False
-            
-        if not os.path.isabs(config_file):
-            print(f"Error: Project config file '{config_file}' must be an absolute path")
-            return False
-            
-        # Check if config file exists
-        if not os.path.exists(config_file):
-            print(f"Warning: Project config file '{config_file}' does not exist")
-            # Don't return False here, to allow for initialization scenarios where the file is created after
-            
-        # Create the registry file if it doesn't exist
-        registry_path = Path(registry_file)
-        if not registry_path.exists():
-            # Create directory if needed
-            registry_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Create a minimal registry file with header comments
-            with open(registry_file, 'w') as f:
-                f.write("""# !! WARNING: This file is managed by the 'graphiti init' command. !!
-# !! Avoid manual edits unless absolutely necessary.                 !!
-#
-# Maps project names to their configuration details.
-# Paths should be absolute for reliability.
-projects: {}
-""")
-            print(f"Created new registry file: {registry_file}")
-        
-        # Initialize YAML with round-trip mode
-        yaml = YAML()
-        yaml.preserve_quotes = True
-        yaml.indent(mapping=2, sequence=4, offset=2)
-        
-        # Load the registry file
-        with open(registry_file, 'r') as f:
-            data = yaml.load(f)
-            
-        # Validate the YAML structure
-        if not isinstance(data, dict) or 'projects' not in data:
-            print(f"Error: Invalid registry file format. Missing 'projects' key or not a dictionary.")
-            return False
-            
-        # Create the projects dict if it doesn't exist
-        if data['projects'] is None:
-            data['projects'] = {}
-            
-        # Add or update the project entry
-        data['projects'][project_name] = {
-            'root_dir': root_dir,
-            'config_file': config_file,
-            'enabled': enabled
-        }
-        
-        # Write back to the registry file
-        with open(registry_file, 'w') as f:
-            yaml.dump(data, f)
-            
-        print(f"Successfully updated registry for project '{project_name}'")
-        return True
-        
-    except Exception as e:
-        print(f"Error updating registry: {str(e)}")
-        return False
-
-
-def main():
-    """Parse command-line arguments and execute the appropriate action."""
-    parser = argparse.ArgumentParser(description='YAML Helper for Graphiti MCP Server')
-    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
-    
-    # Update registry command
-    update_parser = subparsers.add_parser('update-registry', help='Update the central project registry')
-    update_parser.add_argument('--registry-file', required=True, help='Path to the registry file (mcp-projects.yaml)')
-    update_parser.add_argument('--project-name', required=True, help='Name of the project')
-    update_parser.add_argument('--root-dir', required=True, help='Absolute path to the project root directory')
-    update_parser.add_argument('--config-file', required=True, help='Absolute path to the project config file')
-    update_parser.add_argument('--enabled', action='store_true', default=True, help='Whether the project should be enabled')
-    
-    # Parse arguments
-    args = parser.parse_args()
-    
-    # Execute the appropriate command
-    if args.command == 'update-registry':
-        success = update_registry(
-            args.registry_file,
-            args.project_name,
-            args.root_dir,
-            args.config_file,
-            args.enabled
-        )
-        sys.exit(0 if success else 1)
-    else:
-        parser.print_help()
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
-```
-
-## File: scripts/graphiti
-```
-#!/bin/bash
-set -e # Exit immediately if a command exits with a non-zero status.
-
-# Define color codes
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
-
-# Function to display usage information
-usage() {
-  echo -e "${BOLD}Usage:${NC} graphiti [-h|--help] [COMMAND] [ARGS...]"
-  echo
-  echo -e "${BOLD}Commands:${NC}"
-  echo -e "  ${CYAN}init${NC} PROJECT_NAME [DIR]        Initialize a project: create config and entities directory, and set up rules."
-  echo -e "  ${CYAN}entity${NC} SET_NAME                Create a new entity type set with an example entity in the mcp-graphiti repo."
-  echo -e "  ${CYAN}rules${NC} PROJECT_NAME [DIR]       Setup Cursor rules (.mdc files) for Graphiti in a target project directory."
-  echo -e "  ${CYAN}up${NC} [-d] [--log-level LEVEL]    Start all containers using docker compose. Use -d for detached mode."
-  echo -e "  ${CYAN}down${NC} [--log-level LEVEL]       Stop and remove all containers using docker compose."
-  echo -e "  ${CYAN}restart${NC} [--log-level LEVEL]    Restart all containers: runs 'down' followed by 'up'."
-  echo -e "  ${CYAN}reload${NC} SERVICE_NAME            Restart a specific running service container to reload code changes."
-  echo -e "  ${CYAN}compose${NC}                        Generate docker-compose.yml file from base-compose.yaml and mcp-projects.yaml."
-  echo
-  echo -e "${BOLD}Arguments for init & rules:${NC}"
-  echo -e "  ${BOLD}PROJECT_NAME${NC}  Name of the target project (used for schema filename)."
-  echo -e "  ${BOLD}DIR${NC}           Optional. Target project root directory. Defaults to current directory (.)."
-  echo
-  echo -e "${BOLD}Arguments for reload:${NC}"
-  echo -e "  ${BOLD}SERVICE_NAME${NC}  Name of the service to reload (e.g., mcp-alpha-main)."
-  echo
-  echo -e "${BOLD}Options:${NC}"
-  echo -e "  ${BOLD}-h, --help${NC}                Show this help message and exit."
-  echo -e "  ${BOLD}-d${NC}                        Run containers in detached mode (background) with 'up' command."
-  echo -e "  ${BOLD}--log-level LEVEL${NC}         Set logging level (with up/down/restart). Valid values: debug, info, warn, error, fatal."
-  echo -e "                                  Default: info"
-  echo
-  echo -e "${BOLD}Prerequisites:${NC}"
-  echo -e "  The ${CYAN}MCP_GRAPHITI_REPO_PATH${NC} environment variable must be set to the"
-  echo -e "  absolute path of your local mcp-graphiti repository."
-  echo -e "  Example: ${YELLOW}export MCP_GRAPHITI_REPO_PATH=/path/to/mcp-graphiti${NC}"
-  exit 0
-}
-
-# Function to convert set name to a class name (e.g., my-cool-set to MyCoolSetEntity)
-set_name_to_class_name() {
-  local set_name="$1"
-  local class_name=""
-  
-  # Split by hyphens and underscores, capitalize each part, and join
-  IFS='-_' read -ra PARTS <<< "$set_name"
-  for part in "${PARTS[@]}"; do
-    # Capitalize first letter of each part
-    class_name+="$(tr '[:lower:]' '[:upper:]' <<< "${part:0:1}")${part:1}"
-  done
-  
-  # Add "Entity" suffix
-  echo "${class_name}Entity"
-}
-
-# --- Helper Function for Setting Up Rules ---
-_setup_rules() {
-  local PROJECT_NAME="$1"
-  local TARGET_DIR="${2:-.}" # Default target directory to current if not provided
-
-  # Validate PROJECT_NAME format (optional, but good practice)
-  if ! [[ "$PROJECT_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    echo -e "${RED}Error: Invalid PROJECT_NAME. Use only letters, numbers, underscores, and hyphens.${NC}"
-    exit 1
-  fi
-
-  # Define paths
-  local CURSOR_RULES_DIR="$TARGET_DIR/.cursor/rules/graphiti"
-  local SOURCE_CORE_RULE="$SOURCE_SERVER_DIR/rules/graphiti-mcp-core-rules.md"
-  local SOURCE_MAINT_RULE="$SOURCE_SERVER_DIR/rules/graphiti-knowledge-graph-maintenance.md"
-  local TARGET_CORE_RULE_LINK="$CURSOR_RULES_DIR/graphiti-mcp-core-rules.mdc"
-  local TARGET_MAINT_RULE_LINK="$CURSOR_RULES_DIR/graphiti-knowledge-graph-maintenance.mdc"
-  local TARGET_SCHEMA_FILE="$CURSOR_RULES_DIR/graphiti-$PROJECT_NAME-schema.mdc"
-  local SCHEMA_TEMPLATE_FILE="$SOURCE_SERVER_DIR/rules/templates/project_schema_template.md"
-
-  echo -e "Setting up Graphiti Cursor rules for project '${CYAN}$PROJECT_NAME${NC}' in ${CYAN}$TARGET_DIR${NC}"
-
-  # Create target directory
-  mkdir -p "$CURSOR_RULES_DIR"
-  echo -e "Created rules directory: ${CYAN}$CURSOR_RULES_DIR${NC}"
-
-  # Check source files exist before linking/generating
-  if [ ! -f "$SOURCE_CORE_RULE" ]; then
-    echo -e "${RED}Error: Source rule file not found: $SOURCE_CORE_RULE${NC}"
-    exit 1
-  fi
-  if [ ! -f "$SOURCE_MAINT_RULE" ]; then
-    echo -e "${RED}Error: Source rule file not found: $SOURCE_MAINT_RULE${NC}"
-    exit 1
-  fi
-  if [ ! -f "$SCHEMA_TEMPLATE_FILE" ]; then
-    echo -e "${RED}Error: Schema template file not found: $SCHEMA_TEMPLATE_FILE${NC}"
-    exit 1
-  fi
-
-  # Create symlinks
-  echo -e "Linking core rule: ${CYAN}$TARGET_CORE_RULE_LINK${NC} -> ${CYAN}$SOURCE_CORE_RULE${NC}"
-  ln -sf "$SOURCE_CORE_RULE" "$TARGET_CORE_RULE_LINK"
-
-  echo -e "Linking maintenance rule: ${CYAN}$TARGET_MAINT_RULE_LINK${NC} -> ${CYAN}$SOURCE_MAINT_RULE${NC}"
-  ln -sf "$SOURCE_MAINT_RULE" "$TARGET_MAINT_RULE_LINK"
-
-  # Generate template project schema file from template (.md -> .mdc)
-  if [ -e "$TARGET_SCHEMA_FILE" ]; then
-    echo -e "${YELLOW}Warning: Project schema file already exists, skipping template generation: $TARGET_SCHEMA_FILE${NC}"
-  else
-    echo -e "Generating template project schema file: ${CYAN}$TARGET_SCHEMA_FILE${NC}"
-    sed "s/__PROJECT_NAME__/$PROJECT_NAME/g" "$SCHEMA_TEMPLATE_FILE" > "$TARGET_SCHEMA_FILE"
-  fi
-
-  echo -e "${GREEN}Graphiti Cursor rules setup complete for project '$PROJECT_NAME'.${NC}"
-}
-
-# --- Helper Function for Ensuring docker-compose.yml is Generated ---
-_ensure_docker_compose_file() {
-  local MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
-  local DOCKER_COMPOSE_FILE="$MCP_SERVER_DIR/docker-compose.yml"
-  
-  echo -e "${BOLD}Ensuring docker-compose.yml is up-to-date...${NC}"
-  
-  # Check if we need to regenerate the file
-  # Always regenerate for safety, but could add timestamp checks later if needed
-  local CURRENT_DIR=$(pwd)
-  
-  # Change to mcp_server directory
-  cd "$MCP_SERVER_DIR"
-  
-  # Run the generation script
-  echo -e "Generating docker-compose.yml from templates..."
-  "./generate_compose.py" > /dev/null 2>&1
-  local RESULT=$?
-  
-  if [ $RESULT -ne 0 ]; then
-    echo -e "${RED}Warning: Failed to generate docker-compose.yml file.${NC}"
-    echo -e "${YELLOW}Continuing with existing file if it exists.${NC}"
-  fi
-  
-  # Return to the original directory
-  cd "$CURRENT_DIR"
-  
-  # Check if the file exists now
-  if [ ! -f "$DOCKER_COMPOSE_FILE" ]; then
-    echo -e "${RED}Error: docker-compose.yml file does not exist and could not be generated.${NC}"
-    return 1
-  fi
-  
-  return 0
-}
-
-# Function to find the repository path based on script location
-detect_repo_path() {
-  # Get the real path of the script (resolving any symlinks)
-  local SCRIPT_PATH=""
-  
-  # First attempt - use readlink if available
-  if command -v readlink >/dev/null 2>&1; then
-    # Check if readlink -f is supported (Linux/BSD)
-    if readlink -f / >/dev/null 2>&1; then
-      SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "$0" 2>/dev/null)
-    else
-      # For macOS, which doesn't support readlink -f
-      SCRIPT_PATH=$(perl -MCwd -e 'print Cwd::abs_path shift' "${BASH_SOURCE[0]}" 2>/dev/null || perl -MCwd -e 'print Cwd::abs_path shift' "$0" 2>/dev/null)
-    fi
-  fi
-  
-  # Fallback if readlink or perl failed
-  if [ -z "$SCRIPT_PATH" ]; then
-    SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
-  fi
-  
-  echo "Debug: Script path resolved to: $SCRIPT_PATH" >&2
-  
-  # Get the script directory
-  local SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
-  echo "Debug: Script directory: $SCRIPT_DIR" >&2
-  
-  # Check if we're in the expected directory structure
-  # We know the script should be in mcp_server/scripts/
-  # First possibility: script is executed from its original location
-  if [[ "$SCRIPT_DIR" == */mcp_server/scripts ]]; then
-    # Go up two levels to get the repo root
-    local REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-    echo "Debug: Detected repo root (direct): $REPO_ROOT" >&2
-    
-    if [ -d "$REPO_ROOT/mcp_server" ] && [ -d "$REPO_ROOT/mcp_server/entity_types" ]; then
-      echo "$REPO_ROOT"
-      return 0
-    fi
-  fi
-  
-  # Second possibility: we need to search for the repo structure
-  # Try the current directory first
-  local CURRENT_DIR="$(pwd)"
-  echo "Debug: Checking current directory: $CURRENT_DIR" >&2
-  
-  if [ -d "$CURRENT_DIR/mcp_server" ] && [ -d "$CURRENT_DIR/mcp_server/entity_types" ]; then
-    echo "Debug: Found repo structure in current directory" >&2
-    echo "$CURRENT_DIR"
-    return 0
-  fi
-  
-  # Try one level up (in case we're in a subdirectory of the repo)
-  local PARENT_DIR="$(cd .. && pwd)"
-  echo "Debug: Checking parent directory: $PARENT_DIR" >&2
-  
-  if [ -d "$PARENT_DIR/mcp_server" ] && [ -d "$PARENT_DIR/mcp_server/entity_types" ]; then
-    echo "Debug: Found repo structure in parent directory" >&2
-    echo "$PARENT_DIR"
-    return 0
-  fi
-  
-  # If we got here, we couldn't find the repo root
-  echo "Debug: Could not find repository structure" >&2
-  return 1
-}
-
-# Function to offer saving the path to shell config
-save_path_to_shell_config() {
-  local PATH_TO_SAVE="$1"
-  local CONFIG_FILE=""
-  
-  # Detect which shell config file to use
-  if [ -n "$BASH_VERSION" ]; then
-    CONFIG_FILE="$HOME/.bashrc"
-  elif [ -n "$ZSH_VERSION" ]; then
-    CONFIG_FILE="$HOME/.zshrc"
-  else
-    # Try to detect shell from process
-    local SHELL_NAME="$(basename "$SHELL")"
-    case "$SHELL_NAME" in
-      bash) CONFIG_FILE="$HOME/.bashrc" ;;
-      zsh) CONFIG_FILE="$HOME/.zshrc" ;;
-      *) 
-        echo "Could not determine your shell configuration file."
-        echo "Please manually add the following line to your shell configuration:"
-        echo "export MCP_GRAPHITI_REPO_PATH=\"$PATH_TO_SAVE\""
-        return 1
-        ;;
-    esac
-  fi
-  
-  # Ask user for confirmation before modifying their shell config
-  echo -n "Would you like to permanently save MCP_GRAPHITI_REPO_PATH=\"$PATH_TO_SAVE\" to $CONFIG_FILE? (y/n): "
-  read -r CONFIRM
-  
-  if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
-    echo "" >> "$CONFIG_FILE"
-    echo "# Added by graphiti script" >> "$CONFIG_FILE"
-    echo "export MCP_GRAPHITI_REPO_PATH=\"$PATH_TO_SAVE\"" >> "$CONFIG_FILE"
-    echo "Path saved to $CONFIG_FILE. Please restart your terminal or run 'source $CONFIG_FILE' to apply."
-    return 0
-  else
-    echo "Path not saved. You'll need to set MCP_GRAPHITI_REPO_PATH manually each time."
-    echo "You can do this by running: export MCP_GRAPHITI_REPO_PATH=\"$PATH_TO_SAVE\""
-    return 1
-  fi
-}
-
-# Function to validate and set the log level
-validate_log_level() {
-  local log_level=$1
-  
-  # Convert to lowercase for case-insensitive comparison
-  log_level=$(echo "$log_level" | tr '[:upper:]' '[:lower:]')
-  
-  # Validate against allowed values
-  case "$log_level" in
-    debug|info|warn|error|fatal)
-      echo "$log_level"
-      return 0
-      ;;
-    *)
-      echo -e "${RED}Error: Invalid log level '$log_level'. Valid values are: debug, info, warn, error, fatal.${NC}" >&2
-      echo -e "Using default log level: info" >&2
-      echo "info"
-      return 1
-      ;;
-  esac
-}
-
-# Function to ensure dist directory is available for Docker build
-#
-# This function checks if the graphiti-core package is configured to use a local wheel
-# If so, it ensures the dist directory exists and copies the wheel files to the mcp_server/dist directory
-# This is used to ensure the graphiti-core package is built and available for use in the Docker containers
-#
-# If the graphiti-core package is configured to use the published package, this function will return 0 and no action will be taken
-ensure_dist_for_build() {
-  echo -e "${BOLD}Checking build configuration...${NC}"
-  
-  # Check if we're using local wheel in pyproject.toml
-  if ! grep -q "graphiti-core @ file:///dist/" "$MCP_GRAPHITI_REPO_PATH/mcp_server/pyproject.toml" || \
-     grep -q "^[^#]*graphiti-core>=" "$MCP_GRAPHITI_REPO_PATH/mcp_server/pyproject.toml"; then
-    echo -e "${CYAN}Using published graphiti-core package. Skipping local wheel setup.${NC}"
-    return 0
-  fi
-  
-  echo -e "${CYAN}Local graphiti-core wheel configuration detected.${NC}"
-  
-  # Source and target paths
-  local REPO_DIST="$MCP_GRAPHITI_REPO_PATH/dist"
-  local SERVER_DIST="$MCP_GRAPHITI_REPO_PATH/mcp_server/dist"
-  
-  # Check if source dist exists
-  if [ ! -d "$REPO_DIST" ]; then
-    echo -e "${RED}Error: dist directory not found at $REPO_DIST${NC}"
-    echo -e "Please build the graphiti-core wheel first."
-    return 1
-  fi
-  
-  # Create target directory if needed
-  mkdir -p "$SERVER_DIST"
-  
-  # Copy wheel files
-  echo -e "Copying wheel files from ${CYAN}$REPO_DIST${NC} to ${CYAN}$SERVER_DIST${NC}"
-  cp -f "$REPO_DIST"/*.whl "$SERVER_DIST/"
-  
-  echo -e "${GREEN}Dist directory prepared for Docker build.${NC}"
-  return 0
-}
-
-# Check for help flag
-if [[ "$1" == "-h" || "$1" == "--help" ]]; then
-  usage
-fi
-
-# 1. Check and Determine Source Path
-if [ -z "$MCP_GRAPHITI_REPO_PATH" ]; then
-  echo -e "${YELLOW}MCP_GRAPHITI_REPO_PATH is not set. Attempting to auto-detect...${NC}"
-  
-  # Try to auto-detect the repository path based on script location
-  AUTO_DETECTED_PATH=$(detect_repo_path)
-  
-  if [ -n "$AUTO_DETECTED_PATH" ]; then
-    echo -e "Detected repository path: ${CYAN}$AUTO_DETECTED_PATH${NC}"
-    export MCP_GRAPHITI_REPO_PATH="$AUTO_DETECTED_PATH"
-    
-    # Offer to save it permanently
-    save_path_to_shell_config "$AUTO_DETECTED_PATH"
-  else
-    echo -e "${RED}Error: Could not auto-detect the repository path.${NC}"
-    echo -e "Please set the ${CYAN}MCP_GRAPHITI_REPO_PATH${NC} environment variable manually."
-    echo -e "Example: ${YELLOW}export MCP_GRAPHITI_REPO_PATH=/path/to/mcp-graphiti${NC}"
-    exit 1
-  fi
-fi
-
-SOURCE_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
-if [ ! -d "$SOURCE_SERVER_DIR" ]; then
-  echo -e "${RED}Error: Source directory not found: $SOURCE_SERVER_DIR${NC}"
-  echo -e "Please ensure ${CYAN}MCP_GRAPHITI_REPO_PATH${NC} is set correctly."
-  exit 1
-fi
-
-# 2. Parse command and arguments
-COMMAND="${1}" # No default command
-shift || true # Shift arguments even if $1 was empty (no command given). Use || true to prevent exit on error if no args.
-
-# If no command is provided, show usage
-if [ -z "$COMMAND" ]; then
-  echo -e "${YELLOW}No command specified.${NC}"
-  usage
-fi
-
-# Handle commands using if/elif/else structure
-if [[ "$COMMAND" == "init" ]]; then
-  PROJECT_NAME="$1"
-  TARGET_DIR="${2:-.}" # Default target directory to current if not provided
-
-  if [ -z "$PROJECT_NAME" ]; then
-    echo -e "${RED}Error: Missing PROJECT_NAME argument for init command.${NC}"
-    echo -e "Usage: ${CYAN}graphiti init PROJECT_NAME [TARGET_DIRECTORY]${NC}"
-    exit 1
-  fi
-
-  echo -e "Initializing Graphiti project '${CYAN}$PROJECT_NAME${NC}' in '${CYAN}$TARGET_DIR${NC}'..."
-
-  # Create template mcp-config.yaml in the target directory
-  cat > "$TARGET_DIR/mcp-config.yaml" << EOF
-# Configuration for project: $PROJECT_NAME
-services:
-  - id: ${PROJECT_NAME}-main # Service ID (used for default naming)
-    # container_name: "custom-name" # Optional: Specify custom container name
-    # port_default: 8001           # Optional: Specify custom host port
-    group_id: "$PROJECT_NAME"     # Graph group ID
-    entity_dir: "entities"       # Relative path to entity definitions within project
-    # environment:                 # Optional: Add non-secret env vars here
-    #   MY_FLAG: "true"
-EOF
-  echo -e "Created template ${CYAN}$TARGET_DIR/mcp-config.yaml${NC}"
-
-  # Create entities directory
-  mkdir -p "$TARGET_DIR/entities"
-  touch "$TARGET_DIR/entities/.gitkeep"
-  echo -e "Created entities directory: ${CYAN}$TARGET_DIR/entities${NC}"
-
-  # Set up rules
-  _setup_rules "$PROJECT_NAME" "$TARGET_DIR"
-
-  # Update central registry
-  # Get absolute paths
-  ABS_TARGET_DIR=$(cd "$TARGET_DIR" && pwd)
-  ABS_CONFIG_PATH="$ABS_TARGET_DIR/mcp-config.yaml"
-  CENTRAL_REGISTRY_PATH="$SOURCE_SERVER_DIR/mcp-projects.yaml"
-  
-  echo -e "Updating central project registry: ${CYAN}$CENTRAL_REGISTRY_PATH${NC}"
-  "$SOURCE_SERVER_DIR/scripts/_yaml_helper.py" update-registry \
-    --registry-file "$CENTRAL_REGISTRY_PATH" \
-    --project-name "$PROJECT_NAME" \
-    --root-dir "$ABS_TARGET_DIR" \
-    --config-file "$ABS_CONFIG_PATH"
-  
-  # Check exit code from the Python script
-  if [ $? -ne 0 ]; then
-    echo -e "${RED}Error: Failed to update project registry.${NC}"
-    exit 1
-  fi
-
-  echo -e "${GREEN}Graphiti project '$PROJECT_NAME' initialization complete.${NC}"
-  exit 0
-
-elif [[ "$COMMAND" == "up" ]]; then
-  # Parse flags
-  DETACHED=""
-  LOG_LEVEL_OVERRIDE=""
-  
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -d)
-        DETACHED="-d"
-        shift
-        ;;
-      --log-level)
-        if [[ -z "$2" || "$2" == -* ]]; then
-          echo -e "${RED}Error: --log-level requires a value${NC}"
-          exit 1
-        fi
-        LOG_LEVEL_OVERRIDE=$(validate_log_level "$2")
-        shift 2
-        ;;
-      *)
-        echo -e "${RED}Error: Unknown option: $1${NC}"
-        usage
-        ;;
-    esac
-  done
-
-  # We need to run docker-compose from the mcp_server directory
-  MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
-  
-  if [ ! -d "$MCP_SERVER_DIR" ]; then
-    echo -e "${RED}Error: mcp_server directory not found at $MCP_SERVER_DIR${NC}"
-    exit 1
-  fi
-
-  # Save current directory to return to it afterwards
-  CURRENT_DIR=$(pwd)
-  
-  echo -e "${BOLD}Starting Graphiti containers with docker compose...${NC}"
-  echo -e "This will rebuild containers to incorporate any changes."
-  echo -e "Running Docker Compose from: ${CYAN}$MCP_SERVER_DIR${NC}"
-  
-  # Change to mcp_server directory where docker-compose.yml is located
-  cd "$MCP_SERVER_DIR"
-  
-  # Create environment variable exports for Docker Compose
-  if [ -n "$LOG_LEVEL_OVERRIDE" ]; then
-    echo -e "Setting log level to: ${CYAN}$LOG_LEVEL_OVERRIDE${NC}"
-    export GRAPHITI_LOG_LEVEL="$LOG_LEVEL_OVERRIDE"
-  fi
-  
-  # Ensure docker-compose.yml is generated before continuing
-  _ensure_docker_compose_file || exit 1
-  
-  # Ensure dist directory is ready for build
-  ensure_dist_for_build || exit 1
-  
-  # Run docker compose up with build and force-recreate flags
-  if [ -n "$DETACHED" ]; then
-    echo -e "${YELLOW}Running in detached mode.${NC}"
-    docker compose up --build --force-recreate -d
-  else
-    docker compose up --build --force-recreate
-  fi
-  
-  # Return to original directory
-  cd "$CURRENT_DIR"
-  
-  echo -e "${GREEN}Docker compose up completed.${NC}"
-  exit 0
-
-elif [[ "$COMMAND" == "down" ]]; then
-  # Parse flags
-  LOG_LEVEL_OVERRIDE=""
-  
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --log-level)
-        if [[ -z "$2" || "$2" == -* ]]; then
-          echo -e "${RED}Error: --log-level requires a value${NC}"
-          exit 1
-        fi
-        LOG_LEVEL_OVERRIDE=$(validate_log_level "$2")
-        shift 2
-        ;;
-      *)
-        echo -e "${RED}Error: Unknown option: $1${NC}"
-        usage
-        ;;
-    esac
-  done
-  
-  # We need to run docker-compose from the mcp_server directory
-  MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
-  
-  if [ ! -d "$MCP_SERVER_DIR" ]; then
-    echo -e "${RED}Error: mcp_server directory not found at $MCP_SERVER_DIR${NC}"
-    exit 1
-  fi
-
-  # Save current directory to return to it afterwards
-  CURRENT_DIR=$(pwd)
-  
-  echo -e "${BOLD}Stopping and removing Graphiti containers...${NC}"
-  echo -e "Running Docker Compose from: ${CYAN}$MCP_SERVER_DIR${NC}"
-  
-  # Change to mcp_server directory where docker-compose.yml is located
-  cd "$MCP_SERVER_DIR"
-  
-  # Set environment variables for Docker Compose
-  if [ -n "$LOG_LEVEL_OVERRIDE" ]; then
-    echo -e "Setting log level to: ${CYAN}$LOG_LEVEL_OVERRIDE${NC}"
-    export GRAPHITI_LOG_LEVEL="$LOG_LEVEL_OVERRIDE"
-  fi
-  
-  # Run docker compose down to stop and remove containers
-  docker compose down
-  
-  # Return to original directory
-  cd "$CURRENT_DIR"
-  
-  echo -e "${GREEN}Docker compose down completed.${NC}"
-  exit 0
-
-elif [[ "$COMMAND" == "restart" ]]; then
-  # Parse flags
-  DETACHED=""
-  LOG_LEVEL_OVERRIDE=""
-  
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -d)
-        DETACHED="-d"
-        shift
-        ;;
-      --log-level)
-        if [[ -z "$2" || "$2" == -* ]]; then
-          echo -e "${RED}Error: --log-level requires a value${NC}"
-          exit 1
-        fi
-        LOG_LEVEL_OVERRIDE=$(validate_log_level "$2")
-        shift 2
-        ;;
-      *)
-        echo -e "${RED}Error: Unknown option: $1${NC}"
-        usage
-        ;;
-    esac
-  done
-  
-  # We need to run docker-compose from the mcp_server directory
-  MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
-  
-  if [ ! -d "$MCP_SERVER_DIR" ]; then
-    echo -e "${RED}Error: mcp_server directory not found at $MCP_SERVER_DIR${NC}"
-    exit 1
-  fi
-
-  # Save current directory to return to it afterwards
-  CURRENT_DIR=$(pwd)
-  
-  echo -e "${BOLD}Restarting Graphiti containers: first down, then up...${NC}"
-  echo -e "Running Docker Compose from: ${CYAN}$MCP_SERVER_DIR${NC}"
-  
-  # Set environment variables for Docker Compose
-  if [ -n "$LOG_LEVEL_OVERRIDE" ]; then
-    echo -e "Setting log level to: ${CYAN}$LOG_LEVEL_OVERRIDE${NC}"
-    export GRAPHITI_LOG_LEVEL="$LOG_LEVEL_OVERRIDE"
-  fi
-  
-  # Change to mcp_server directory where docker-compose.yml is located
-  cd "$MCP_SERVER_DIR"
-  
-  # First run docker compose down
-  echo -e "${CYAN}Stopping containers...${NC}"
-  docker compose down
-  
-  # Ensure docker-compose.yml is generated before continuing
-  _ensure_docker_compose_file || exit 1
-  
-  # Ensure dist directory is ready for build
-  ensure_dist_for_build || exit 1
-  
-  # Then run docker compose up
-  echo -e "${CYAN}Starting containers...${NC}"
-  if [ -n "$DETACHED" ]; then
-    echo -e "${YELLOW}Running in detached mode.${NC}"
-    docker compose up --build --force-recreate -d
-  else
-    docker compose up --build --force-recreate
-  fi
-  
-  # Return to original directory
-  cd "$CURRENT_DIR"
-  
-  echo -e "${GREEN}Restart sequence completed.${NC}"
-  exit 0
-
-elif [[ "$COMMAND" == "entity" ]]; then
-  # Get SET_NAME from first remaining argument
-  SET_NAME="$1"
-  
-  # Input validation
-  if [ -z "$SET_NAME" ]; then
-    echo -e "${RED}Error: Missing SET_NAME argument.${NC}"
-    echo -e "Usage: ${CYAN}graphiti entity SET_NAME${NC}"
-    exit 1
-  fi
-  
-  # Validate SET_NAME format (only allow letters, numbers, underscores, hyphens)
-  if ! [[ "$SET_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    echo -e "${RED}Error: Invalid SET_NAME. Use only letters, numbers, underscores, and hyphens.${NC}"
-    exit 1
-  fi
-  
-  # Path construction
-  ENTITY_TYPES_DIR="$SOURCE_SERVER_DIR/entity_types"
-  NEW_SET_DIR="$ENTITY_TYPES_DIR/$SET_NAME"
-  
-  # Check if directory already exists
-  if [ -d "$NEW_SET_DIR" ]; then
-    echo "Error: Entity type set '$SET_NAME' already exists at: $NEW_SET_DIR"
-    exit 1
-  fi
-  
-  # Create the new directory
-  mkdir -p "$NEW_SET_DIR"
-  echo "Created entity type set directory: $NEW_SET_DIR"
-  
-  # Generate class name from SET_NAME
-  CLASS_NAME=$(set_name_to_class_name "$SET_NAME")
-  
-  # Create entity file using the custom_entity_example.py as a template
-  ENTITY_FILE="$NEW_SET_DIR/entity.py"
-  TEMPLATE_FILE="$SOURCE_SERVER_DIR/entity_types/example/custom_entity_example.py"
-  
-  # Check if template file exists
-  if [ ! -f "$TEMPLATE_FILE" ]; then
-    echo "Warning: Template file not found: $TEMPLATE_FILE"
-    echo "Creating a minimal entity file instead."
-    
-    # Create a minimal entity file
-    cat > "$ENTITY_FILE" << EOF
-from pydantic import BaseModel, Field
-
-
-class $CLASS_NAME(BaseModel):
-    """Example entity for the '$SET_NAME' set."""
-    
-    example_field: str = Field(
-        ...,
-        description='An example field.',
-    )
-EOF
-  else
-    # Read the template and replace the class name
-    sed -e "s/class Product/class $CLASS_NAME/" \
-        -e "s/A Product/$CLASS_NAME/" \
-        -e "s/products/${SET_NAME}s/" \
-        -e "s/the product/the ${SET_NAME}/" \
-        "$TEMPLATE_FILE" > "$ENTITY_FILE"
-    
-    echo "Created entity file using template: $ENTITY_FILE"
-  fi
-  
-  echo "Entity set '$SET_NAME' successfully created."
-  exit 0
-
-elif [[ "$COMMAND" == "rules" ]]; then
-  PROJECT_NAME="$1"
-  TARGET_DIR="${2:-.}" # Default target directory to current if not provided
-
-  if [ -z "$PROJECT_NAME" ]; then
-    echo "Error: Missing PROJECT_NAME argument for rules command."
-    echo "Usage: graphiti rules PROJECT_NAME [TARGET_DIRECTORY]"
-    exit 1
-  fi
-
-  # Call the helper function (validation is inside the helper)
-  _setup_rules "$PROJECT_NAME" "$TARGET_DIR"
-  exit 0
-
-elif [[ "$COMMAND" == "compose" ]]; then
-  # We need to run generate_compose.py from the mcp_server directory
-  MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
-  
-  if [ ! -d "$MCP_SERVER_DIR" ]; then
-    echo -e "${RED}Error: mcp_server directory not found at $MCP_SERVER_DIR${NC}"
-    exit 1
-  fi
-
-  # Save current directory to return to it afterwards
-  CURRENT_DIR=$(pwd)
-  
-  echo -e "${BOLD}Generating docker-compose.yml from templates...${NC}"
-  echo -e "Running from: ${CYAN}$MCP_SERVER_DIR${NC}"
-  
-  # Change to mcp_server directory where the script is located
-  cd "$MCP_SERVER_DIR"
-  
-  # Run the generation script
-  "./generate_compose.py"
-  RESULT=$?
-  
-  # Check the result and provide appropriate feedback
-  if [ $RESULT -eq 0 ]; then
-    echo -e "${GREEN}Successfully generated docker-compose.yml file.${NC}"
-  else
-    echo -e "${RED}Error: Failed to generate docker-compose.yml file.${NC}"
-  fi
-  
-  # Return to original directory
-  cd "$CURRENT_DIR"
-  
-  exit $RESULT
-
-elif [[ "$COMMAND" == "reload" ]]; then
-  # Get SERVICE_NAME from first remaining argument
-  SERVICE_NAME="$1"
-  
-  # Input validation
-  if [ -z "$SERVICE_NAME" ]; then
-    echo -e "${RED}Error: Missing SERVICE_NAME argument for reload command.${NC}"
-    echo -e "Usage: ${CYAN}graphiti reload SERVICE_NAME${NC}"
-    exit 1
-  fi
-  
-  # We need to run docker compose from the mcp_server directory
-  MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
-  
-  if [ ! -d "$MCP_SERVER_DIR" ]; then
-    echo -e "${RED}Error: mcp_server directory not found at $MCP_SERVER_DIR${NC}"
-    exit 1
-  fi
-  
-  # Save current directory to return to it afterwards
-  CURRENT_DIR=$(pwd)
-  
-  # Change to mcp_server directory where docker-compose.yml is located
-  cd "$MCP_SERVER_DIR"
-  
-  # Execute the restart command
-  echo -e "${BOLD}Attempting to restart service '${CYAN}$SERVICE_NAME${NC}'...${NC}"
-  # Use docker compose restart which handles finding the container by service name
-  docker compose restart "$SERVICE_NAME"
-  RESULT=$?
-  
-  # Return to original directory
-  cd "$CURRENT_DIR"
-  
-  # Provide feedback
-  if [ $RESULT -eq 0 ]; then
-    echo -e "${GREEN}Service '$SERVICE_NAME' restarted successfully.${NC}"
-  else
-    echo -e "${RED}Error: Failed to restart service '$SERVICE_NAME'. Check if the service name is correct and the stack is running.${NC}"
-  fi
-  
-  exit $RESULT
-
-else
-  echo -e "${RED}Error: Unknown command '$COMMAND'${NC}"
-  usage
-fi
-```
+````
 
 ## File: .env.example
-```
+````
 # Graphiti MCP Server Environment Configuration
 
 # --- Required Secrets ---
@@ -2507,23 +4114,23 @@ GRAPHITI_LOG_LEVEL=info
 # Only uncomment and set to "true" when you specifically need to clear all data
 # Always comment out or set back to "false" immediately after use
 # NEO4J_DESTROY_ENTIRE_GRAPH=true
-```
+````
 
 ## File: .python-version
-```
+````
 3.10
-```
+````
 
 ## File: .repomixignore
-```
+````
 # Add patterns to ignore here, one per line
 # Example:
 # *.log
 # tmp/
-```
+````
 
 ## File: base-compose.yaml
-```yaml
+````yaml
 # base-compose.yaml
 # Base structure for the Docker Compose configuration, including static services and anchors.
 
@@ -2626,10 +4233,10 @@ services:
 volumes:
   neo4j_data: # Persists Neo4j graph data
   neo4j_logs: # Persists Neo4j logs
-```
+````
 
 ## File: custom_servers.yaml
-```yaml
+````yaml
 # custom_servers.yaml
 # Configuration for custom Graphiti MCP services.
 # Defaults:
@@ -2655,15 +4262,15 @@ custom_mcp_servers:
     # Uses default container var (CANDIDATES_CONTAINER_NAME), port var (CANDIDATES_PORT:-8003)
     group_id: "graphiti-candidates" # Override default group_id
     dir: "entity_types/candidates"  # Explicitly set dir (same as default here, just showing override)
-```
+````
 
 ## File: docker-compose.yml
-```yaml
-# Generated by generate_compose.py
+````yaml
+# Generated by graphiti CLI
 # Do not edit this file directly. Modify base-compose.yaml or project-specific mcp-config.yaml files instead.
 
 # --- Custom MCP Services Info ---
-# Default Ports: Assigned sequentially starting from 8001 (8000 + index + 1)
+# Default Ports: Assigned sequentially starting from 8001
 #              Can be overridden by specifying 'port_default' in project's mcp-config.yaml.
 
 # base-compose.yaml
@@ -2759,46 +4366,24 @@ services:
       MCP_ENTITY_TYPE_DIR: "entity_types/base"
 
 # --- Volumes ---
-  mcp-test-project-1-main:
-    <<: *graphiti-mcp-custom-base
-    container_name: mcp-test-project-1-main
-    ports:
-      - 8001:${MCP_ROOT_CONTAINER_PORT:-8000}
-    volumes:
-      - /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/test-project-1/entities:/app/project_entities:ro
-    environment:
-      MCP_GROUP_ID: test-project-1
-      MCP_USE_CUSTOM_ENTITIES: 'true'
-      MCP_ENTITY_TYPE_DIR: /app/project_entities
-  mcp-test-project-2-main:
-    <<: *graphiti-mcp-custom-base
-    container_name: mcp-test-project-2-main
-    ports:
-      - 8002:${MCP_ROOT_CONTAINER_PORT:-8000}
-    volumes:
-      - /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/test-project-2/entities:/app/project_entities:ro
-    environment:
-      MCP_GROUP_ID: test-project-2
-      MCP_USE_CUSTOM_ENTITIES: 'true'
-      MCP_ENTITY_TYPE_DIR: /app/project_entities
   mcp-filesystem-main:
     <<: *graphiti-mcp-custom-base
-    container_name: mcp-filesystem-main
-    ports:
-      - 8003:${MCP_ROOT_CONTAINER_PORT:-8000}
-    volumes:
-      - /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/entities:/app/project_entities:ro
     environment:
       MCP_GROUP_ID: filesystem
       MCP_USE_CUSTOM_ENTITIES: 'true'
       MCP_ENTITY_TYPE_DIR: /app/project_entities
+    container_name: mcp-filesystem-main
+    ports:
+      - 8001:${MCP_PORT}
+    volumes:
+      - /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/entities:/app/project_entities:ro
 volumes:
   neo4j_data: # Persists Neo4j graph data
   neo4j_logs: # Persists Neo4j logs
-```
+````
 
 ## File: Dockerfile
-```dockerfile
+````dockerfile
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -2853,10 +4438,10 @@ ENTRYPOINT ["./entrypoint.sh"]
 
 # Original CMD instruction has been replaced by the ENTRYPOINT above
 # CMD ["uv", "run", "graphiti_mcp_server.py"]
-```
+````
 
 ## File: entrypoint.sh
-```bash
+````bash
 #!/bin/sh
 # docker-entrypoint.sh
 # This script constructs and executes the graphiti_mcp_server command
@@ -2887,13 +4472,19 @@ fi
 
 # --entity-type-dir (Optional path)
 if [ -n "$MCP_ENTITY_TYPE_DIR" ]; then
-  CMD_ARGS="$CMD_ARGS --entity-type-dir \"$MCP_ENTITY_TYPE_DIR\""
+  CMD_ARGS="$CMD_ARGS --entity-type-dir $MCP_ENTITY_TYPE_DIR"
 fi
 
 # --entity-types (Optional space-separated list)
 # Assumes the python script handles a space-separated list after the flag.
 if [ -n "$MCP_ENTITY_TYPES" ]; then
    CMD_ARGS="$CMD_ARGS --entity-types $MCP_ENTITY_TYPES"
+fi
+
+# --log-level (Pass based on ENV var)
+# Read the env var set by docker compose (from .env or compose override)
+if [ -n "$GRAPHITI_LOG_LEVEL" ]; then
+  CMD_ARGS="$CMD_ARGS --log-level $GRAPHITI_LOG_LEVEL"
 fi
 
 # --destroy-graph (Boolean flag)
@@ -2918,218 +4509,10 @@ echo "--------------------------------------------------"
 # "$@" passes along any arguments that might have been added via
 # 'command:' in docker-compose.yml (though we aren't using them here).
 exec $FULL_CMD "$@"
-```
-
-## File: generate_compose.py
-```python
-#!/usr/bin/env python3
-"""
-Generate docker-compose.yml by combining base-compose.yaml with custom server definitions
-from mcp-projects.yaml using ruamel.yaml to preserve anchors and aliases.
-"""
-
-# Use ruamel.yaml instead of pyyaml
-from ruamel.yaml import YAML
-from ruamel.yaml.scalarstring import LiteralScalarString # For multi-line strings potentially
-from ruamel.yaml.comments import CommentedMap # For adding merge keys
-import sys
-import os
-
-# --- Configuration ---
-BASE_COMPOSE_FILE = 'base-compose.yaml'
-MCP_PROJECTS_FILE = 'mcp-projects.yaml'
-OUTPUT_COMPOSE_FILE = 'docker-compose.yml'
-# Default container port used in port mappings for custom servers
-DEFAULT_MCP_CONTAINER_PORT_VAR = "MCP_ROOT_CONTAINER_PORT:-8000"
-# Starting port number for default calculation
-DEFAULT_PORT_START = 8000
-# Path inside container where project entities will be mounted
-CONTAINER_ENTITY_PATH = "/app/project_entities"
-
-# --- Initialize ruamel.yaml ---
-# Use the round-trip loader/dumper to preserve structure
-yaml = YAML()
-yaml.preserve_quotes = True # Optional: Preserve quotes if needed
-yaml.indent(mapping=2, sequence=4, offset=2) # Standard Docker Compose indentation
-
-# --- Load Base Docker Compose Structure ---
-try:
-    with open(BASE_COMPOSE_FILE, 'r') as f:
-        # Use ruamel.yaml load
-        compose_data = yaml.load(f)
-except FileNotFoundError:
-    print(f"Error: Base configuration file '{BASE_COMPOSE_FILE}' not found.")
-    sys.exit(1)
-except Exception as e: # Catch ruamel.yaml errors
-    print(f"Error parsing base YAML file '{BASE_COMPOSE_FILE}': {e}")
-    sys.exit(1)
-
-if not isinstance(compose_data, dict) or 'services' not in compose_data or not isinstance(compose_data.get('services'), dict):
-     print(f"Error: Invalid structure in '{BASE_COMPOSE_FILE}'. Must be a dictionary with a 'services' key.")
-     sys.exit(1)
-
-# --- Load Project Registry ---
-# Use safe loader for registry data
-registry_yaml = YAML(typ='safe')
-try:
-    with open(MCP_PROJECTS_FILE, 'r') as f:
-        projects_registry = registry_yaml.load(f)
-except FileNotFoundError:
-    print(f"Warning: Project registry file '{MCP_PROJECTS_FILE}' not found. No custom services will be added.")
-    projects_registry = {'projects': {}}
-except Exception as e: # Catch ruamel.yaml errors
-    print(f"Error parsing project registry file '{MCP_PROJECTS_FILE}': {e}")
-    sys.exit(1)
-
-if not projects_registry or 'projects' not in projects_registry:
-    print(f"Warning: Invalid format or missing 'projects' key in '{MCP_PROJECTS_FILE}'. No custom services will be added.")
-    projects_registry = {'projects': {}}
-
-
-# --- Generate and Add Custom Service Definitions ---
-# Ensure 'services' key exists and is a CommentedMap (should be from ruamel load)
-if 'services' not in compose_data: compose_data['services'] = CommentedMap()
-services_map = compose_data['services']
-
-# Retrieve the object associated with the anchor we want to merge
-# We need the actual Python object that &graphiti-mcp-custom-base points to.
-# ruamel.yaml stores anchors separately. We need to find the object.
-# Let's assume the object is directly accessible via its key in the top-level map.
-custom_base_anchor_obj = compose_data.get('x-graphiti-mcp-custom-base')
-
-if not custom_base_anchor_obj:
-    print("Error: Could not find the 'x-graphiti-mcp-custom-base' definition in base YAML.")
-    sys.exit(1)
-
-overall_service_index = 0
-for project_name, project_data in projects_registry.get('projects', {}).items():
-    if not project_data.get('enabled', False):
-        continue
-    
-    project_config_path = project_data.get('config_file')
-    if not project_config_path:
-        print(f"Warning: Skipping project '{project_name}' due to missing config_file path.")
-        continue
-    
-    # Load project config file
-    try:
-        with open(project_config_path, 'r') as f:
-            project_config = registry_yaml.load(f)
-    except FileNotFoundError:
-        print(f"Warning: Project config file '{project_config_path}' not found for project '{project_name}'. Skipping.")
-        continue
-    except Exception as e:
-        print(f"Error parsing project config file '{project_config_path}' for project '{project_name}': {e}. Skipping.")
-        continue
-    
-    if not project_config or 'services' not in project_config:
-        print(f"Warning: Invalid format or missing 'services' key in '{project_config_path}'. No services will be added for project '{project_name}'.")
-        continue
-    
-    for server_conf in project_config.get('services', []):
-        if not isinstance(server_conf, dict):
-            print(f"Warning: Skipping service in project '{project_name}' as it's not a dictionary: {server_conf}")
-            continue
-
-        server_id = server_conf.get('id')
-        if not server_id:
-            print(f"Warning: Skipping service in project '{project_name}' due to missing required field 'id': {server_conf}")
-            continue
-
-        # --- Apply Defaults ---
-        entity_type_dir = server_conf.get('entity_dir')
-        if not entity_type_dir:
-            print(f"Warning: Skipping service '{server_id}' in project '{project_name}' due to missing required field 'entity_dir'.")
-            continue
-        
-        project_root_dir = project_data.get('root_dir')
-        if not project_root_dir:
-            print(f"Warning: Skipping service '{server_id}' in project '{project_name}' due to missing project root_dir.")
-            continue
-        
-        # --- End Defaults ---
-
-        service_name = f"mcp-{server_id}"
-        
-        # Get container name from config or use default
-        container_name = server_conf.get('container_name')
-        if container_name is None:
-            container_name = f"mcp-{server_id}"
-        
-        # Get port from config or use default
-        port_default = server_conf.get('port_default')
-        if port_default is None:
-            port_default = DEFAULT_PORT_START + overall_service_index + 1
-        port_mapping = f"{port_default}:${{{DEFAULT_MCP_CONTAINER_PORT_VAR}}}"
-
-        # Use CommentedMap for the service definition to allow adding merge key
-        new_service = CommentedMap()
-        new_service['container_name'] = container_name
-        new_service['ports'] = [port_mapping] # List of ports
-
-        # Create environment map
-        env_vars = CommentedMap()
-        mcp_group_id = server_conf.get('group_id', server_id)
-        env_vars['MCP_GROUP_ID'] = mcp_group_id
-        env_vars['MCP_USE_CUSTOM_ENTITIES'] = "true" # Env vars are strings
-        
-        # Calculate absolute path for entity directory
-        abs_host_entity_path = os.path.abspath(os.path.join(project_root_dir, entity_type_dir))
-        
-        # Add volume mount for entity directory
-        new_service.setdefault('volumes', []).append(f"{abs_host_entity_path}:{CONTAINER_ENTITY_PATH}:ro")
-        
-        # Set MCP_ENTITY_TYPE_DIR to container path
-        env_vars['MCP_ENTITY_TYPE_DIR'] = CONTAINER_ENTITY_PATH
-        
-        # Add any project-specific environment variables
-        project_environment = server_conf.get('environment', {})
-        env_vars.update(project_environment)
-
-        new_service['environment'] = env_vars
-
-        # IMPORTANT: Add the merge key using ruamel.yaml's merge feature
-        # We provide the Python object that was defined with the anchor.
-        # The list [(0, custom_base_anchor_obj)] means insert merge at index 0
-        new_service.add_yaml_merge([(0, custom_base_anchor_obj)])
-
-        # Add the fully constructed service definition to the services map
-        services_map[service_name] = new_service
-        
-        # Increment the overall service index
-        overall_service_index += 1
-
-
-# --- Write the final combined docker-compose.yml ---
-try:
-    with open(OUTPUT_COMPOSE_FILE, 'w') as f:
-        # Add header comment
-        header = [
-            "# Generated by generate_compose.py",
-            "# Do not edit this file directly. Modify base-compose.yaml or project-specific mcp-config.yaml files instead.",
-            "",
-            "# --- Custom MCP Services Info ---",
-            "# Default Ports: Assigned sequentially starting from 8001 (8000 + index + 1)",
-            "#              Can be overridden by specifying 'port_default' in project's mcp-config.yaml.",
-            "\n" # Add extra newline before YAML content
-        ]
-        f.write("\n".join(header))
-
-        # Dump the compose data using ruamel.yaml
-        yaml.dump(compose_data, f)
-
-    print(f"Successfully generated '{OUTPUT_COMPOSE_FILE}' using ruamel.yaml.")
-    print(f"Note: Default ports for custom services start at {DEFAULT_PORT_START + 1} and increment.")
-except IOError as e:
-    print(f"Error writing output file '{OUTPUT_COMPOSE_FILE}': {e}")
-    sys.exit(1)
-except Exception as e:
-    print(f"An unexpected error occurred during YAML dumping: {e}")
-    sys.exit(1)
-```
+````
 
 ## File: graphiti_mcp_server.py
-```python
+````python
 #!/usr/bin/env python3
 """
 Graphiti MCP Server - Exposes Graphiti functionality through the Model Context Protocol (MCP)
@@ -3168,6 +4551,7 @@ from entity_types import get_entity_types, get_entity_type_subset, register_enti
 load_dotenv()
 
 DEFAULT_LLM_MODEL = 'gpt-4o'
+DEFAULT_LOG_LEVEL = logging.INFO
 
 # The ENTITY_TYPES dictionary is managed by the registry in mcp_server.entity_types
 # NOTE: This global reference is only used for predefined entity subsets below.
@@ -3260,7 +4644,7 @@ class MCPConfig(BaseModel):
 
 # Configure logging
 log_level_str = os.environ.get('GRAPHITI_LOG_LEVEL', 'info').upper()
-log_level = getattr(logging, log_level_str, logging.INFO)
+log_level = getattr(logging, log_level_str, DEFAULT_LOG_LEVEL)
 
 logging.basicConfig(
     level=log_level,
@@ -3268,7 +4652,27 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 logger = logging.getLogger(__name__)
-logger.info(f'Logging configured with level: {logging.getLevelName(log_level)}')
+logger.info(f'Initial logging configured with level: {logging.getLevelName(log_level)}')
+
+# Function to reconfigure logging level based on final decision
+def configure_logging(level_name: str):
+    """
+    Configure or reconfigure the logging level based on a string level name.
+    
+    Args:
+        level_name: A string representation of the logging level ('debug', 'info', etc.)
+    """
+    global logger, log_level
+    level_name_upper = level_name.upper()
+    new_level = getattr(logging, level_name_upper, DEFAULT_LOG_LEVEL)
+    if new_level != log_level:  # Only reconfigure if level changes
+        log_level = new_level
+        logging.getLogger().setLevel(log_level)  # Set level on root logger
+        # Re-get logger instance for safety
+        logger = logging.getLogger(__name__)
+        logger.info(f"Logging level reconfigured to: {logging.getLevelName(log_level)}")
+    else:
+        logger.info(f"Logging level remains at: {logging.getLevelName(log_level)}")
 
 # Create global config instance
 config = GraphitiConfig.from_env()
@@ -3977,8 +5381,19 @@ async def initialize_server() -> MCPConfig:
         '--entity-type-dir',
         help='Directory containing custom entity type modules to load'
     )
+    # Add argument for log level
+    parser.add_argument(
+        '--log-level',
+        choices=['debug', 'info', 'warn', 'error', 'fatal'],
+        default=os.environ.get('GRAPHITI_LOG_LEVEL', 'info').lower(),  # Default to ENV or 'info'
+        help='Set the logging level.'
+    )
 
     args = parser.parse_args()
+
+    # Reconfigure logging based on final argument
+    configure_logging(args.log_level)
+    logger.info(f"Final effective logging level: {logging.getLevelName(log_level)}")
 
     # Set the group_id from CLI argument or generate a random one
     if args.group_id:
@@ -4141,10 +5556,10 @@ def load_entity_types_from_directory(directory_path: str) -> None:
 
 if __name__ == '__main__':
     main()
-```
+````
 
 ## File: mcp_config_sse_example.json
-```json
+````json
 {
     "mcpServers": {
         "graphiti": {
@@ -4153,10 +5568,10 @@ if __name__ == '__main__':
         }
     }
 }
-```
+````
 
 ## File: mcp_config_stdio_example.json
-```json
+````json
 {
     "mcpServers": {
         "graphiti": {
@@ -4178,46 +5593,30 @@ if __name__ == '__main__':
         }
     }
 }
-```
+````
 
 ## File: mcp-projects.yaml
-```yaml
+````yaml
 # !! WARNING: This file is managed by the 'graphiti init' command. !!
 # !! Avoid manual edits unless absolutely necessary.                 !!
 #
 # Maps project names to their configuration details.
 # Paths should be absolute for reliability.
 projects:
-  test:
-    root_dir: 
-      /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-graphiti/mcp_server/test
-    config_file: 
-      /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-graphiti/mcp_server/test/mcp-config.yaml
-    enabled: true
 # Example Entry (will be added by 'graphiti init'):
 # alpha:
 #   config_file: /abs/path/to/project-alpha/mcp-config.yaml
 #   root_dir: /abs/path/to/project-alpha
 #   enabled: true 
-  test-project-1:
-    root_dir: /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/test-project-1
-    config_file: 
-      /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/test-project-1/mcp-config.yaml
-    enabled: true
-  test-project-2:
-    root_dir: /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/test-project-2
-    config_file: 
-      /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/test-project-2/mcp-config.yaml
-    enabled: true
   filesystem:
     root_dir: /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem
     config_file: 
-      /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/mcp-config.yaml
+      /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/ai/graph/mcp-config.yaml
     enabled: true
-```
+````
 
 ## File: pyproject.toml
-```toml
+````toml
 [project]
 name = "mcp-server"
 version = "0.1.0"
@@ -4232,11 +5631,25 @@ dependencies = [
     # For production/normal use (uncomment this and comment out the above):
     "graphiti-core>=0.8.5",
     "ruamel.yaml>=0.17.21",
+    "typer[all]>=0.9.0",
+    "python-dotenv>=1.0.0",
 ]
-```
+
+[project.scripts]
+graphiti = "graphiti_cli.main:app"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+# Explicitly specify packages to include
+[tool.setuptools.packages.find]
+include = ["graphiti_cli*"]
+exclude = ["entity_types*", "rules*", "llm_cache*"]
+````
 
 ## File: repomix.config.json
-```json
+````json
 {
   "output": {
     "filePath": "graphiti-mcp-repo.md",
@@ -4277,4 +5690,4 @@ dependencies = [
     "encoding": "o200k_base"
   }
 }
-```
+````

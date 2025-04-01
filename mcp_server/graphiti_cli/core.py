@@ -27,6 +27,21 @@ DEFAULT_MCP_CONTAINER_PORT_VAR = "MCP_PORT"
 CONTAINER_ENTITY_PATH = "/app/entity_types"
 ENV_REPO_PATH = "MCP_GRAPHITI_REPO_PATH"
 
+# --- Directory and File Constants ---
+DIR_MCP_SERVER = "mcp_server"
+DIR_ENTITY_TYPES = "entity_types"
+DIR_AI = "ai"
+DIR_GRAPH = "graph"
+DIR_ENTITIES = "entities"
+DIR_DIST = "dist"
+FILE_PYPROJECT_TOML = "pyproject.toml"
+FILE_GIT_KEEP = ".gitkeep"
+REGEX_VALID_NAME = r'^[a-zA-Z0-9_-]+$'
+
+# --- Package Constants ---
+PACKAGE_LOCAL_WHEEL_MARKER = "graphiti-core @ file:///dist/"
+PACKAGE_PUBLISHED_PREFIX = "graphiti-core>="
+
 # --- Enums ---
 class LogLevel(str, Enum):
     """
@@ -95,8 +110,8 @@ def _validate_repo_path(path: Path) -> bool:
         return False
     
     # Check for essential directories
-    mcp_server_dir = path / "mcp_server"
-    entity_types_dir = mcp_server_dir / "entity_types"
+    mcp_server_dir = path / DIR_MCP_SERVER
+    entity_types_dir = mcp_server_dir / DIR_ENTITY_TYPES
     
     return mcp_server_dir.is_dir() and entity_types_dir.is_dir()
 
@@ -196,14 +211,12 @@ def run_docker_compose(
     """
     mcp_server_dir = get_mcp_server_dir()
     
-    # Add -d flag if detached mode is requested
-    if detached and subcmd[0] in ["up"]:
-        subcmd.append("-d")
+    # Ensure the docker-compose.yml file exists
+    ensure_docker_compose_file()
     
-    # Set environment variables for docker compose
-    env_vars = {
-        "GRAPHITI_LOG_LEVEL": log_level
-    }
+    # Add -d flag if detached mode is requested
+    if detached and subcmd[0] in ["up", "restart"]:  # Add restart for consistency
+        subcmd.append("-d")
     
     # Prepare full command
     cmd = ["docker", "compose"] + subcmd
@@ -213,8 +226,9 @@ def run_docker_compose(
     if log_level != LogLevel.info.value:
         print(f"Log level: {CYAN}{log_level}{NC}")
     
-    # Execute the command
-    run_command(cmd, check=True, env=env_vars, cwd=mcp_server_dir)
+    # Execute the command - Pass the log level as an environment variable
+    env = {"GRAPHITI_LOG_LEVEL": log_level}
+    run_command(cmd, check=True, env=env, cwd=mcp_server_dir)
 
 def ensure_docker_compose_file() -> None:
     """
@@ -223,15 +237,12 @@ def ensure_docker_compose_file() -> None:
     mcp_server_dir = get_mcp_server_dir()
     compose_file = mcp_server_dir / "docker-compose.yml"
     
-    print(f"{BOLD}Ensuring docker-compose.yml is up-to-date...{NC}")
-    
     # Use our Python utility (to be implemented in yaml_utils.py) instead of the script
     # Will be implemented after yaml_utils.py is created
     from . import yaml_utils
     try:
-        yaml_utils.generate_compose_logic(mcp_server_dir)
+        yaml_utils.generate_compose_logic(mcp_server_dir)  # Generate with default log level initially
     except Exception as e:
-        print(f"{RED}Warning: Failed to generate docker-compose.yml file: {e}{NC}")
         print(f"{YELLOW}Continuing with existing file if it exists.{NC}")
     
     # Check if the file exists now
@@ -252,15 +263,15 @@ def ensure_dist_for_build() -> None:
     print(f"{BOLD}Checking build configuration...{NC}")
     
     # Check pyproject.toml to see if we're using local wheel
-    pyproject_path = mcp_server_dir / "pyproject.toml"
+    pyproject_path = mcp_server_dir / FILE_PYPROJECT_TOML
     try:
         with open(pyproject_path, 'r') as f:
             pyproject_content = f.read()
             
         # Check if we're using local wheel and not published package
-        using_local_wheel = "graphiti-core @ file:///dist/" in pyproject_content
+        using_local_wheel = PACKAGE_LOCAL_WHEEL_MARKER in pyproject_content
         using_published = any(
-            line.strip().startswith("graphiti-core>=") 
+            line.strip().startswith(PACKAGE_PUBLISHED_PREFIX) 
             for line in pyproject_content.splitlines()
             if not line.strip().startswith('#')
         )
@@ -272,8 +283,8 @@ def ensure_dist_for_build() -> None:
         print(f"{CYAN}Local graphiti-core wheel configuration detected.{NC}")
         
         # Source and target paths
-        repo_dist = repo_root / "dist"
-        server_dist = mcp_server_dir / "dist"
+        repo_dist = repo_root / DIR_DIST
+        server_dist = mcp_server_dir / DIR_DIST
         
         # Check if source dist exists
         if not repo_dist.is_dir():

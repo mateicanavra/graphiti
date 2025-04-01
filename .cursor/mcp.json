@@ -10,7 +10,7 @@
 		},
 		"graphiti-core": {
 			"transport": "sse",
-			"url": "http://localhost:8003/sse"
+			"url": "http://localhost:8002/sse"
 		},
 		"graphiti-repo-filesystem": {
 			"command": "node",

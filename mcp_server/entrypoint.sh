@@ -37,6 +37,12 @@ if [ -n "$MCP_ENTITY_TYPES" ]; then
    CMD_ARGS="$CMD_ARGS --entity-types $MCP_ENTITY_TYPES"
 fi
 
+# --log-level (Pass based on ENV var)
+# Read the env var set by docker compose (from .env or compose override)
+if [ -n "$GRAPHITI_LOG_LEVEL" ]; then
+  CMD_ARGS="$CMD_ARGS --log-level $GRAPHITI_LOG_LEVEL"
+fi
+
 # --destroy-graph (Boolean flag)
 if [ "$NEO4J_DESTROY_ENTIRE_GRAPH" = "true" ]; then
   CMD_ARGS="$CMD_ARGS --destroy-graph"

@@ -99,7 +99,7 @@ Okay, here is a step-by-step implementation plan for migrating the `graphiti` Ba
     *   Files Involved: `mcp_server/scripts/graphiti`, `mcp_server/scripts/_yaml_helper.py`, `mcp_server/generate_compose.py`
     *   Acceptance: The specified files no longer exist in the repository.
 
-10. **Verify Global Command Path:** (NEW STEP) ✅ COMPLETED
+10. **Verify Global Command Path:** (NEW STEP)
     *   Action: Ensure the `graphiti` command executed from the terminal correctly points to the new Python CLI entry point installed by `pip install -e .` (or equivalent).
         *   Run `which graphiti` (or `type graphiti` depending on shell) to identify the exact script being executed.
         *   Verify this path corresponds to the Python environment where the `mcp-server` package was installed editable.
@@ -163,3 +163,44 @@ Okay, here is a step-by-step implementation plan for migrating the `graphiti` Ba
   - Test the `reload` command (for restarting individual services)
   - Complete Phase 6: Verification and Testing
   - Proceed to Phase 5: Cleanup to remove the original scripts
+
+**Phase 5: Cleanup** ✅ COMPLETED
+
+9.  **Remove Old Scripts:** ✅ COMPLETED
+    *   Action: Delete the following files:
+        *   `mcp_server/scripts/graphiti` (The original Bash script)
+        *   `mcp_server/scripts/_yaml_helper.py`
+        *   `mcp_server/generate_compose.py`
+    *   Files Involved: `mcp_server/scripts/graphiti`, `mcp_server/scripts/_yaml_helper.py`, `mcp_server/generate_compose.py`
+    *   Acceptance: The specified files no longer exist in the repository.
+
+10. **Verify Global Command Path:** ✅ COMPLETED
+    *   Action: Ensure the `graphiti` command executed from the terminal correctly points to the new Python CLI entry point installed by `pip install -e .` (or equivalent).
+        *   Run `which graphiti` (or `type graphiti` depending on shell) to identify the exact script being executed.
+        *   Verify this path corresponds to the Python environment where the `mcp-server` package was installed editable.
+        *   Check common `PATH` directories (e.g., `/usr/local/bin`, `~/.local/bin`, `~/bin`) for any older conflicting `graphiti` files or symlinks and remove them if found.
+    *   Files Involved: Files/symlinks in system `PATH` directories, Python environment's `bin` directory.
+    *   Acceptance: The `which graphiti` command resolves to the correct entry point script created by the package installation. No conflicting executables are found earlier in the `PATH`.
+
+**Phase 6: Verification and Testing** 🔄 IN PROGRESS (Requires Re-verification After Cleanup)
+
+11. **Functional Testing (Using Global Command):** (REVISED STEP)
+    *   Action: Execute the *globally installed* `graphiti` command (verified in Step 10) for each subcommand and option combination. Verify the outputs and side effects are correct and match the behavior tested previously via `python -m ...`. Re-run key tests:
+        *   `graphiti --help` (Verify Python CLI help output)
+        *   `graphiti compose` -> Check `docker-compose.yml` generation.
+        *   `graphiti up --log-level debug` -> Check build configuration message (should now correctly detect published package), check container logs for DEBUG level.
+        *   `graphiti down`
+        *   `graphiti init test-py-proj-global ./temp_test_py_proj_global`
+        *   `graphiti entity my-global-set ./temp_test_py_proj_global`
+        *   `graphiti rules test-py-proj-global ./temp_test_py_proj_global`
+        *   `graphiti restart`
+        *   `graphiti reload <service_name>`
+    *   Files Involved: All CLI files, `mcp-projects.yaml`, `docker-compose.yml`, Docker environment, test project directories.
+    *   Acceptance Criteria:
+        *   All commands execute using the *global* `graphiti` entry point without Python errors.
+        *   The build configuration check (`ensure_dist_for_build`) now correctly identifies the published package based on the saved `pyproject.toml`.
+        *   File system and Docker operations are successful and produce the expected results.
+        *   Outputs match those observed during module-based testing.
+
+**Next Steps:**
+1. Proceed with Phase 6: Verification and Testing (Step 11) using the global command.

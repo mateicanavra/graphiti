@@ -104,11 +104,34 @@ services:
       MCP_GROUP_ID: filesystem
       MCP_USE_CUSTOM_ENTITIES: 'true'
       MCP_ENTITY_TYPE_DIR: /app/project_entities
+      GRAPHITI_LOG_LEVEL: debug
     container_name: mcp-filesystem-main
     ports:
       - 8001:${MCP_PORT}
     volumes:
-      - /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/entities:/app/project_entities:ro
+      - /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/ai/graph/entities:/app/project_entities:ro
+  mcp-filesystem-meta:
+    <<: *graphiti-mcp-custom-base
+    environment:
+      MCP_GROUP_ID: filesystem-meta
+      MCP_USE_CUSTOM_ENTITIES: 'true'
+      MCP_ENTITY_TYPE_DIR: /app/project_entities
+    container_name: mcp-filesystem-meta
+    ports:
+      - 8002:${MCP_PORT}
+    volumes:
+      - /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/ai/graph/entities:/app/project_entities:ro
+  mcp-magic-candidates-main:
+    <<: *graphiti-mcp-custom-base
+    environment:
+      MCP_GROUP_ID: magic-candidates
+      MCP_USE_CUSTOM_ENTITIES: 'true'
+      MCP_ENTITY_TYPE_DIR: /app/project_entities
+    container_name: mcp-magic-candidates-main
+    ports:
+      - 8003:${MCP_PORT}
+    volumes:
+      - /Users/mateicanavra/Documents/.nosync/DEV/magic-apply-candidates/ai/graph/entities:/app/project_entities:ro
 volumes:
   neo4j_data: # Persists Neo4j graph data
   neo4j_logs: # Persists Neo4j logs 

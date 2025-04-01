@@ -14,3 +14,8 @@ projects:
     config_file: 
       /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/ai/graph/mcp-config.yaml
     enabled: true
+  magic-candidates:
+    root_dir: /Users/mateicanavra/Documents/.nosync/DEV/magic-apply-candidates
+    config_file: 
+      /Users/mateicanavra/Documents/.nosync/DEV/magic-apply-candidates/ai/graph/mcp-config.yaml
+    enabled: true

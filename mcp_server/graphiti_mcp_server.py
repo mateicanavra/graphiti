@@ -7,13 +7,14 @@ import argparse
 import asyncio
 import importlib
 import importlib.util
+import json
 import logging
 import os
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, TypedDict, Union, cast
+from typing import Any, Dict, List, Optional, TypedDict, Union, cast
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
@@ -36,6 +37,7 @@ from entity_types import get_entity_types, get_entity_type_subset, register_enti
 load_dotenv()
 
 DEFAULT_LLM_MODEL = 'gpt-4o'
+DEFAULT_LOG_LEVEL = logging.INFO
 
 # The ENTITY_TYPES dictionary is managed by the registry in mcp_server.entity_types
 # NOTE: This global reference is only used for predefined entity subsets below.
@@ -128,7 +130,7 @@ class MCPConfig(BaseModel):
 
 # Configure logging
 log_level_str = os.environ.get('GRAPHITI_LOG_LEVEL', 'info').upper()
-log_level = getattr(logging, log_level_str, logging.INFO)
+log_level = getattr(logging, log_level_str, DEFAULT_LOG_LEVEL)
 
 logging.basicConfig(
     level=log_level,
@@ -136,7 +138,27 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 logger = logging.getLogger(__name__)
-logger.info(f'Logging configured with level: {logging.getLevelName(log_level)}')
+logger.info(f'Initial logging configured with level: {logging.getLevelName(log_level)}')
+
+# Function to reconfigure logging level based on final decision
+def configure_logging(level_name: str):
+    """
+    Configure or reconfigure the logging level based on a string level name.
+    
+    Args:
+        level_name: A string representation of the logging level ('debug', 'info', etc.)
+    """
+    global logger, log_level
+    level_name_upper = level_name.upper()
+    new_level = getattr(logging, level_name_upper, DEFAULT_LOG_LEVEL)
+    if new_level != log_level:  # Only reconfigure if level changes
+        log_level = new_level
+        logging.getLogger().setLevel(log_level)  # Set level on root logger
+        # Re-get logger instance for safety
+        logger = logging.getLogger(__name__)
+        logger.info(f"Logging level reconfigured to: {logging.getLevelName(log_level)}")
+    else:
+        logger.info(f"Logging level remains at: {logging.getLevelName(log_level)}")
 
 # Create global config instance
 config = GraphitiConfig.from_env()
@@ -287,7 +309,7 @@ async def process_episode_queue(group_id: str):
 @mcp.tool()
 async def add_episode(
     name: str,
-    episode_body: str,
+    episode_body: Union[str, Dict[str, Any], List[Any]],
     group_id: Optional[str] = None,
     source: str = 'text',
     source_description: str = '',
@@ -301,9 +323,12 @@ async def add_episode(
 
     Args:
         name (str): Name of the episode
-        episode_body (str): The content of the episode. When source='json', this must be a properly escaped JSON string,
-                           not a raw Python dictionary. The JSON data will be automatically processed
-                           to extract entities and relationships.
+        episode_body (Union[str, Dict[str, Any], List[Any]]): The content of the episode.
+                           When source='json', this can be either:
+                           - A Python dictionary or list that will be automatically serialized, or
+                           - A properly escaped JSON string.
+                           The JSON data will be automatically processed to extract entities and relationships.
+                           For other source types, this must be a string.
         group_id (str, optional): A unique ID for this graph. If not provided, uses the default group_id from CLI
                                  or a generated one.
         source (str, optional): Source type, must be one of:
@@ -325,8 +350,15 @@ async def add_episode(
             group_id="some_arbitrary_string"
         )
 
-        # Adding structured JSON data
-        # NOTE: episode_body must be a properly escaped JSON string. Note the triple backslashes
+        # Adding structured JSON data as a Python dictionary (preferred method)
+        add_episode(
+            name="Customer Profile",
+            episode_body={"company": {"name": "Acme Technologies"}, "products": [{"id": "P001", "name": "CloudSync"}, {"id": "P002", "name": "DataMiner"}]},
+            source="json",
+            source_description="CRM data"
+        )
+        
+        # Adding structured JSON data as a pre-serialized string (alternative method)
         add_episode(
             name="Customer Profile",
             episode_body="{\\\"company\\\": {\\\"name\\\": \\\"Acme Technologies\\\"}, \\\"products\\\": [{\\\"id\\\": \\\"P001\\\", \\\"name\\\": \\\"CloudSync\\\"}, {\\\"id\\\": \\\"P002\\\", \\\"name\\\": \\\"DataMiner\\\"}]}",
@@ -354,11 +386,14 @@ async def add_episode(
 
     Notes:
         When using source='json':
-        - The JSON must be a properly escaped string, not a raw Python dictionary
+        - For convenience, you can provide a Python dictionary or list directly (recommended method)
+        - Alternatively, you can provide a properly escaped JSON string
         - The JSON will be automatically processed to extract entities and relationships
         - Complex nested structures are supported (arrays, nested objects, mixed data types), but keep nesting to a minimum
         - Entities will be created from appropriate JSON properties
         - Relationships between entities will be established based on the JSON structure
+        
+        For source='text' and source='message', only string inputs are accepted.
     """
     global graphiti_client, episode_queues, queue_workers
 
@@ -386,6 +421,41 @@ async def add_episode(
 
         # Use cast to help the type checker understand that graphiti_client is not None
         client = cast(Graphiti, graphiti_client)
+        
+        # Input validation and preparation
+        episode_body_str = ""
+        if source_type == EpisodeType.json:
+            # For JSON source, we accept both dictionaries/lists and pre-serialized strings
+            if isinstance(episode_body, (dict, list)):
+                try:
+                    episode_body_str = json.dumps(episode_body)
+                    logger.debug(f"Successfully serialized dictionary/list to JSON string")
+                except TypeError as e:
+                    error_msg = f"Failed to serialize episode_body to JSON: {str(e)}"
+                    logger.error(error_msg)
+                    return {'error': error_msg}
+            elif isinstance(episode_body, str):
+                # Optionally validate the JSON string
+                try:
+                    json.loads(episode_body)  # Just for validation
+                    episode_body_str = episode_body
+                    logger.debug(f"Verified episode_body is a valid JSON string")
+                except json.JSONDecodeError as e:
+                    error_msg = f"Invalid JSON string provided for episode_body: {str(e)}"
+                    logger.error(error_msg)
+                    return {'error': error_msg}
+            else:
+                error_msg = f"Invalid episode_body type for source='json': {type(episode_body)}. Expected dict, list, or string."
+                logger.error(error_msg)
+                return {'error': error_msg}
+        else:
+            # For text and message sources, we only accept strings
+            if isinstance(episode_body, str):
+                episode_body_str = episode_body
+            else:
+                error_msg = f"Invalid episode_body type for source='{source}': {type(episode_body)}. Expected string."
+                logger.error(error_msg)
+                return {'error': error_msg}
 
         # Define the episode processing function
         async def process_episode():
@@ -421,7 +491,7 @@ async def add_episode(
 
                 await client.add_episode(
                     name=name,
-                    episode_body=episode_body,
+                    episode_body=episode_body_str,
                     source=source_type,
                     source_description=source_description,
                     group_id=group_id_str,  # Using the string version of group_id
@@ -845,8 +915,19 @@ async def initialize_server() -> MCPConfig:
         '--entity-type-dir',
         help='Directory containing custom entity type modules to load'
     )
+    # Add argument for log level
+    parser.add_argument(
+        '--log-level',
+        choices=['debug', 'info', 'warn', 'error', 'fatal'],
+        default=os.environ.get('GRAPHITI_LOG_LEVEL', 'info').lower(),  # Default to ENV or 'info'
+        help='Set the logging level.'
+    )
 
     args = parser.parse_args()
+
+    # Reconfigure logging based on final argument
+    configure_logging(args.log_level)
+    logger.info(f"Final effective logging level: {logging.getLevelName(log_level)}")
 
     # Set the group_id from CLI argument or generate a random one
     if args.group_id:
