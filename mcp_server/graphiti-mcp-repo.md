@@ -27,7 +27,7 @@ The content is organized as follows:
 ## Notes
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Files matching these patterns are excluded: .venv/**, uv.lock, dist/**, .ai/.archive/**, llm_cache/**, scripts/README.md, README.md, docs/**
+- Files matching these patterns are excluded: .venv/**, uv.lock, dist/**, .ai/**, llm_cache/**, scripts/README.md, README.md, docs/**, *.egg-info/**, __pycache__/**, *.pyc, *.pyo, .python-version, .env, *.log
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
@@ -36,22 +36,11 @@ The content is organized as follows:
 
 # Directory Structure
 ```
-.ai/
-  plans/
-    refactor-cli-architecture.md
-    refactor-cli-plan.md
 entity_types/
   base/
     preferences.py
     procedures.py
     requirements.py
-  candidates/
-    Candidate.py
-    Certification.py
-    Education.py
-    Insight.py
-    Skill.py
-    WorkExperience.py
   example/
     company_entity.py
     custom_entity_example.py
@@ -68,13 +57,6 @@ graphiti_cli/
   core.py
   main.py
   yaml_utils.py
-mcp_server.egg-info/
-  dependency_links.txt
-  entry_points.txt
-  PKG-INFO
-  requires.txt
-  SOURCES.txt
-  top_level.txt
 rules/
   examples/
     graphiti-example-schema.md
@@ -83,10 +65,9 @@ rules/
   graphiti-knowledge-graph-maintenance.md
   graphiti-mcp-core-rules.md
 .env.example
-.python-version
 .repomixignore
 base-compose.yaml
-custom_servers.yaml
+constants.py
 docker-compose.yml
 Dockerfile
 entrypoint.sh
@@ -100,984 +81,8 @@ repomix.config.json
 
 # Files
 
-## File: .ai/plans/refactor-cli-architecture.md
-````markdown
-Okay, let's refine the architecture proposal for migrating the `graphiti` Bash script to Python, integrating existing Python helpers (`_yaml_helper.py`, `generate_compose.py`), and ensuring it aligns well with your current setup.
-
-We'll aim for a clean, maintainable Python CLI tool using **Typer** for the interface, **ruamel.yaml** for config file handling (as already established), and standard Python libraries (`subprocess`, `pathlib`, `os`, `shutil`) for orchestration.
-
-**Consolidation Strategy:**
-
-1.  **Integrate YAML Logic:** The core logic from `generate_compose.py` (@LINE:1-191) and `_yaml_helper.py` (@LINE:1-111) will be moved into functions within a dedicated `yaml_utils.py` module as part of the new CLI tool package. This eliminates executing them as separate scripts.
-2.  **Retain Server Logic:** `graphiti_mcp_server.py` (@LINE:1-780) remains the server application. Its `argparse` logic handles arguments passed _inside_ the container (via `entrypoint.sh`). The new Python CLI tool will _not_ replicate this internal server argument parsing; it focuses on orchestrating Docker and project setup from the host.
-3.  **Entity Registry:** `entity_registry.py` (@LINE:1-41) remains part of the server's domain, used during entity loading within the server runtime. The CLI tool doesn't interact with it directly.
-
-**Proposed Python CLI Architecture:**
-
-1.  **New Package Structure (Example):**
-    We'll create a dedicated package for the CLI tool. This could live at the repository root or within the existing `scripts/` directory. Let's assume we create `graphiti_cli/` at the root for clarity.
-
-    ```
-    mcp-graphiti/
-    ├── mcp_server/
-    │   ├── entity_types/
-    │   ├── rules/
-    │   ├── Dockerfile
-    │   ├── entrypoint.sh
-    │   ├── base-compose.yaml
-    │   ├── mcp-projects.yaml
-    │   ├── docker-compose.yml  # (Generated)
-    │   ├── graphiti_mcp_server.py
-    │   ├── entity_registry.py
-    │   └── ... (other server files)
-    ├── graphiti_cli/           # <--- NEW CLI Package
-    │   ├── __init__.py
-    │   ├── main.py             # Typer app definition, command entry points
-    │   ├── core.py             # Core logic: finding paths, running subprocesses
-    │   ├── commands.py         # Command implementations (init, up, down, etc.)
-    │   └── yaml_utils.py       # Integrated YAML handling logic
-    ├── pyproject.toml          # <--- Modified
-    ├── .env.example
-    └── ... (other repo files)
-    ```
-
-2.  **`pyproject.toml` Modifications:**
-    Update your main `pyproject.toml` (@LINE:1-16) (or create one at the root if it doesn't exist there) to include the CLI tool dependencies and define the script entry point.
-
-    ```toml
-    # pyproject.toml
-
-    [build-system]
-    requires = ["setuptools>=61.0"]
-    build-backend = "setuptools.build_meta"
-
-    [project]
-    name = "graphiti-mcp-tools" # Name for the installable package containing the CLI
-    version = "0.1.0" # Consider syncing with server version or managing independently
-    description = "CLI Tools for Graphiti MCP Server Management"
-    readme = "README.md"
-    requires-python = ">=3.10"
-    dependencies = [
-        # CLI specific dependencies:
-        "typer[all]>=0.9.0", # [all] includes rich for better tracebacks/output
-        "ruamel.yaml>=0.17.21",
-        "python-dotenv>=1.0.0", # Useful for potentially reading .env in CLI too
-        # Add other CLI-specific needs here
-    ]
-    # Note: Dependencies for the *server* itself (mcp, openai, graphiti-core)
-    # might be listed here if you install both server and CLI from the same
-    # pyproject.toml, or they could remain separate if the server has its own.
-    # For simplicity now, assuming they might be installed together.
-    # If separating, remove server deps from here.
-
-    [project.scripts]
-    # This makes the 'graphiti' command available after 'pip install .'
-    graphiti = "graphiti_cli.main:app"
-    ```
-
-    _(Self-correction: Added `build-system` section for modern packaging)_
-
-3.  **`graphiti_cli/main.py` (Entry Point & Typer App):**
-
-    ```python
-    # graphiti_cli/main.py
-    import typer
-    from pathlib import Path
-    from typing_extensions import Annotated # Preferred for Typer >= 0.9
-
-    # Import command functions and core utilities
-    from . import commands
-    from .core import LogLevel, get_repo_root
-
-    # Initialize Typer app
-    app = typer.Typer(
-        help="CLI for managing Graphiti MCP Server projects and Docker environment.",
-        no_args_is_help=True, # Show help if no command is given
-        rich_markup_mode="markdown" # Nicer help text formatting
-    )
-
-    # --- Callback to ensure repo path is found early ---
-    @app.callback()
-    def main_callback(ctx: typer.Context):
-        """
-        Main callback to perform setup before any command runs.
-        Ensures the MCP_GRAPHITI_REPO_PATH is found.
-        """
-        # Ensure repo root is detected/set early.
-        # get_repo_root() will print messages and exit if not found.
-        _ = get_repo_root()
-
-
-    # --- Define Commands (delegating to functions in commands.py) ---
-
-    @app.command()
-    def init(
-        project_name: Annotated[str, typer.Argument(help="Name of the target project.")],
-        target_dir: Annotated[Path, typer.Argument(
-            ".", # Default to current directory
-            help="Target project root directory.",
-            exists=False, # Allow creating the directory
-            file_okay=False,
-            dir_okay=True,
-            writable=True,
-            resolve_path=True # Convert to absolute path
-        )] = Path(".")
-    ):
-        """
-        Initialize a project: create ai/graph structure with config, entities dir, and rules. ✨
-        """
-        commands.init_project(project_name, target_dir)
-
-    @app.command()
-    def entity(
-        set_name: Annotated[str, typer.Argument(help="Name for the new entity type set (e.g., 'my-entities').")],
-        target_dir: Annotated[Path, typer.Argument(
-            ".",
-            help="Target project root directory containing ai/graph/mcp-config.yaml.",
-            exists=True, # Must exist for entity creation
-            file_okay=False,
-            dir_okay=True,
-            resolve_path=True
-        )] = Path(".")
-    ):
-        """
-        Create a new entity type set directory and template file within a project's ai/graph/entities directory. 📄
-        """
-        commands.create_entity_set(set_name, target_dir)
-
-    @app.command()
-    def rules(
-        project_name: Annotated[str, typer.Argument(help="Name of the target project for rule setup.")],
-        target_dir: Annotated[Path, typer.Argument(
-            ".",
-            help="Target project root directory.",
-            exists=True, # Must exist for rules setup
-            file_okay=False,
-            dir_okay=True,
-            resolve_path=True
-        )] = Path(".")
-    ):
-        """
-        Setup/update Cursor rules symlinks and schema template for a project. 🔗
-        """
-        commands.setup_rules(project_name, target_dir)
-
-    @app.command()
-    def up(
-        detached: Annotated[bool, typer.Option("--detached", "-d", help="Run containers in detached mode.")] = False,
-        log_level: Annotated[LogLevel, typer.Option("--log-level", help="Set logging level for containers.", case_sensitive=False)] = LogLevel.info
-    ):
-        """
-        Start all containers using Docker Compose (builds first). 🚀
-        """
-        commands.docker_up(detached, log_level.value)
-
-    @app.command()
-    def down(
-        log_level: Annotated[LogLevel, typer.Option("--log-level", help="Set logging level for Docker Compose execution.", case_sensitive=False)] = LogLevel.info
-    ):
-        """
-        Stop and remove all containers using Docker Compose. 🛑
-        """
-        commands.docker_down(log_level.value)
-
-    @app.command()
-    def restart(
-        detached: Annotated[bool, typer.Option("--detached", "-d", help="Run 'up' in detached mode after 'down'.")] = False,
-        log_level: Annotated[LogLevel, typer.Option("--log-level", help="Set logging level for containers.", case_sensitive=False)] = LogLevel.info
-    ):
-        """
-        Restart all containers: runs 'down' then 'up'. 🔄
-        """
-        commands.docker_restart(detached, log_level.value)
-
-    @app.command()
-    def reload(
-        service_name: Annotated[str, typer.Argument(help="Name of the service to reload (e.g., 'mcp-test-project-1-main').")]
-    ):
-        """
-        Restart a specific running service container. ⚡
-        """
-        commands.docker_reload(service_name)
-
-    @app.command()
-    def compose():
-        """
-        Generate docker-compose.yml from base and project configs. ⚙️
-        """
-        commands.docker_compose_generate()
-
-
-    # Allow running the script directly for development/testing
-    if __name__ == "__main__":
-        app()
-    ```
-
-    _(Self-correction: Using `Annotated` for Typer arguments/options as it's the modern approach. Added `no_args_is_help=True`. Added emojis for fun.)_
-
-4.  **`graphiti_cli/core.py` (Core Utilities):**
-    (Similar to the previous proposal, containing `get_repo_root`, `get_mcp_server_dir`, `run_command`, `LogLevel` enum, ANSI colors, etc. No major changes needed here from the previous draft.)
-
-5.  **`graphiti_cli/yaml_utils.py` (Consolidated YAML Logic):**
-
-    ```python
-    # graphiti_cli/yaml_utils.py
-    import sys
-    from pathlib import Path
-    from ruamel.yaml import YAML
-    from ruamel.yaml.comments import CommentedMap
-    import os
-    from typing import Optional, List, Dict, Any
-
-    from .core import get_mcp_server_dir, CONTAINER_ENTITY_PATH, DEFAULT_PORT_START, DEFAULT_MCP_CONTAINER_PORT_VAR # Import constants
-
-    # --- YAML Instances ---
-    yaml_rt = YAML() # Round-Trip for preserving structure/comments
-    yaml_rt.preserve_quotes = True
-    yaml_rt.indent(mapping=2, sequence=4, offset=2)
-
-    yaml_safe = YAML(typ='safe') # Safe loader for reading untrusted/simple config
-
-    # --- File Handling ---
-    def load_yaml_file(file_path: Path, safe: bool = False) -> Optional[Any]:
-        """Loads a YAML file, handling errors."""
-        yaml_loader = yaml_safe if safe else yaml_rt
-        if not file_path.is_file():
-            print(f"Warning: YAML file not found or is not a file: {file_path}")
-            return None
-        try:
-            with file_path.open('r') as f:
-                return yaml_loader.load(f)
-        except Exception as e:
-            print(f"Error parsing YAML file '{file_path}': {e}")
-            return None # Or raise specific exception
-
-    def write_yaml_file(data: Any, file_path: Path, header: Optional[List[str]] = None):
-         """Writes data to a YAML file using round-trip dumper."""
-         try:
-             # Ensure parent directory exists
-             file_path.parent.mkdir(parents=True, exist_ok=True)
-             with file_path.open('w') as f:
-                 if header:
-                     f.write("\n".join(header) + "\n\n") # Add extra newline
-                 yaml_rt.dump(data, f)
-         except IOError as e:
-             print(f"Error writing YAML file '{file_path}': {e}")
-             raise # Re-raise after printing
-         except Exception as e:
-             print(f"An unexpected error occurred during YAML dumping to '{file_path}': {e}")
-             raise
-
-    # --- Logic from _yaml_helper.py ---
-    def update_registry_logic(
-        registry_file: Path,
-        project_name: str,
-        root_dir: Path, # Expecting resolved absolute path
-        config_file: Path, # Expecting resolved absolute path
-        enabled: bool = True
-    ) -> bool:
-        """
-        Updates the central project registry file (mcp-projects.yaml).
-        Corresponds to the logic in the old _yaml_helper.py.
-        """
-        print(f"Updating registry '{registry_file}' for project '{project_name}'")
-        if not root_dir.is_absolute() or not config_file.is_absolute():
-             print("Error: Project root_dir and config_file must be absolute paths.")
-             return False
-
-        if not config_file.exists():
-             print(f"Warning: Project config file '{config_file}' does not exist.")
-             # Allow continuing for init scenarios
-
-        # Create registry file with header if it doesn't exist
-        if not registry_file.exists():
-            print(f"Creating new registry file: {registry_file}")
-            header = [
-                "# !! WARNING: This file is managed by the 'graphiti init' command. !!",
-                "# !! Avoid manual edits unless absolutely necessary.                 !!",
-                "#",
-                "# Maps project names to their configuration details.",
-                "# Paths should be absolute for reliability.",
-            ]
-            initial_data = CommentedMap({'projects': CommentedMap()})
-            try:
-                write_yaml_file(initial_data, registry_file, header=header)
-            except Exception:
-                 return False # Error handled in write_yaml_file
-
-        # Load existing registry data using round-trip loader
-        data = load_yaml_file(registry_file, safe=False)
-        if data is None:
-             print(f"Error: Could not load registry file {registry_file}")
-             return False
-
-        if not isinstance(data, dict) or 'projects' not in data:
-            print(f"Error: Invalid registry file format in {registry_file}. Missing 'projects' key.")
-            return False
-
-        # Ensure 'projects' key exists and is a map
-        if data.get('projects') is None:
-             data['projects'] = CommentedMap()
-        elif not isinstance(data['projects'], dict):
-              print(f"Error: 'projects' key in {registry_file} is not a dictionary.")
-              return False
-
-
-        # Add or update the project entry (convert Paths to strings for YAML)
-        project_entry = CommentedMap({
-            'root_dir': str(root_dir),
-            'config_file': str(config_file),
-            'enabled': enabled
-        })
-        data['projects'][project_name] = project_entry
-
-        # Write back to the registry file
-        try:
-            # Preserve header by reading first few lines if necessary (complex)
-            # Simpler: Assume header is managed manually or re-added if file recreated.
-            # We rewrite the whole file here.
-            write_yaml_file(data, registry_file)
-            print(f"Successfully updated registry for project '{project_name}'")
-            return True
-        except Exception:
-             return False # Error handled in write_yaml_file
-
-
-    # --- Logic from generate_compose.py ---
-    def generate_compose_logic(mcp_server_dir: Path):
-        """
-        Generates the final docker-compose.yml by merging base and project configs.
-        Corresponds to the logic in the old generate_compose.py.
-        """
-        print("Generating docker-compose.yml...")
-        base_compose_path = mcp_server_dir / 'base-compose.yaml'
-        projects_registry_path = mcp_server_dir / 'mcp-projects.yaml'
-        output_compose_path = mcp_server_dir / 'docker-compose.yml'
-
-        # Load base compose file
-        compose_data = load_yaml_file(base_compose_path, safe=False)
-        if compose_data is None or not isinstance(compose_data, dict):
-            print(f"Error: Failed to load or parse base compose file: {base_compose_path}")
-            sys.exit(1)
-
-        if 'services' not in compose_data or not isinstance(compose_data.get('services'), dict):
-            print(f"Error: Invalid structure in '{base_compose_path}'. Missing 'services' dictionary.")
-            sys.exit(1)
-
-        # Load project registry safely
-        projects_registry = load_yaml_file(projects_registry_path, safe=True)
-        if projects_registry is None:
-            print(f"Warning: Project registry file '{projects_registry_path}' not found or failed to parse. No custom services will be added.")
-            projects_registry = {'projects': {}}
-        elif 'projects' not in projects_registry or not isinstance(projects_registry['projects'], dict):
-            print(f"Warning: Invalid format or missing 'projects' key in '{projects_registry_path}'. No custom services will be added.")
-            projects_registry = {'projects': {}}
-
-        # --- Generate Custom Service Definitions ---
-        services_map = compose_data['services'] # Should be CommentedMap
-
-        # Find the anchor object for merging
-        custom_base_anchor_obj = compose_data.get('x-graphiti-mcp-custom-base')
-        if not custom_base_anchor_obj:
-            print(f"{RED}Error: Could not find 'x-graphiti-mcp-custom-base' definition in {base_compose_path}.{NC}")
-            sys.exit(1)
-
-        overall_service_index = 0
-        # Iterate through projects from the registry
-        for project_name, project_data in projects_registry.get('projects', {}).items():
-            if not isinstance(project_data, dict) or not project_data.get('enabled', False):
-                continue # Skip disabled or invalid projects
-
-            project_config_path_str = project_data.get('config_file')
-            project_root_dir_str = project_data.get('root_dir')
-
-            if not project_config_path_str or not project_root_dir_str:
-                print(f"Warning: Skipping project '{project_name}' due to missing 'config_file' or 'root_dir'.")
-                continue
-
-            project_config_path = Path(project_config_path_str)
-            project_root_dir = Path(project_root_dir_str)
-
-            # Load the project's specific mcp-config.yaml
-            project_config = load_yaml_file(project_config_path, safe=True)
-            if project_config is None:
-                print(f"Warning: Skipping project '{project_name}' because config file '{project_config_path}' could not be loaded.")
-                continue
-
-            if 'services' not in project_config or not isinstance(project_config['services'], list):
-                print(f"Warning: Skipping project '{project_name}' due to missing or invalid 'services' list in '{project_config_path}'.")
-                continue
-
-            # Iterate through services defined in the project's config
-            for server_conf in project_config['services']:
-                if not isinstance(server_conf, dict):
-                    print(f"Warning: Skipping invalid service entry in '{project_config_path}': {server_conf}")
-                    continue
-
-                server_id = server_conf.get('id')
-                entity_type_dir = server_conf.get('entity_dir') # Relative path within project
-
-                if not server_id or not entity_type_dir:
-                    print(f"Warning: Skipping service in '{project_name}' due to missing 'id' or 'entity_dir': {server_conf}")
-                    continue
-
-                # --- Determine Service Configuration ---
-                service_name = f"mcp-{server_id}"
-                container_name = server_conf.get('container_name', service_name) # Default to service_name
-                port_default = server_conf.get('port_default', DEFAULT_PORT_START + overall_service_index + 1)
-                port_mapping = f"{port_default}:${{{DEFAULT_MCP_CONTAINER_PORT_VAR}}}" # Use f-string
-
-                # --- Build Service Definition using CommentedMap ---
-                new_service = CommentedMap()
-                # Add the merge key first using the anchor object
-                new_service.add_yaml_merge([(0, custom_base_anchor_obj)]) # Merge base config
-
-                new_service['container_name'] = container_name
-                new_service['ports'] = [port_mapping] # Ports must be a list
-
-                # --- Environment Variables ---
-                env_vars = CommentedMap() # Use CommentedMap to preserve order if needed
-                mcp_group_id = server_conf.get('group_id', project_name) # Default group_id to project_name
-                env_vars['MCP_GROUP_ID'] = mcp_group_id
-                env_vars['MCP_USE_CUSTOM_ENTITIES'] = 'true' # Assume true if defined here
-
-                # Calculate absolute host path for entity volume mount
-                abs_host_entity_path = (project_root_dir / entity_type_dir).resolve()
-                if not abs_host_entity_path.is_dir():
-                     print(f"Warning: Entity directory '{abs_host_entity_path}' for service '{service_name}' does not exist. Volume mount might fail.")
-                     # Continue anyway, Docker will create an empty dir inside container if host path doesn't exist
-
-                # Set container path for entity directory env var
-                env_vars['MCP_ENTITY_TYPE_DIR'] = CONTAINER_ENTITY_PATH
-
-                # Add project-specific environment variables from mcp-config.yaml
-                project_environment = server_conf.get('environment', {})
-                if isinstance(project_environment, dict):
-                     env_vars.update(project_environment)
-                else:
-                     print(f"Warning: Invalid 'environment' section for service '{service_name}' in '{project_config_path}'. Expected a dictionary.")
-
-                new_service['environment'] = env_vars
-
-                # --- Volumes ---
-                # Ensure volumes list exists (might be added by anchor merge, check needed?)
-                # setdefault is safer if anchor doesn't guarantee 'volumes'
-                if 'volumes' not in new_service:
-                     new_service['volumes'] = []
-                elif not isinstance(new_service['volumes'], list):
-                     print(f"Warning: 'volumes' merged from anchor for service '{service_name}' is not a list. Overwriting.")
-                     new_service['volumes'] = []
-
-                # Append the entity volume mount (read-only)
-                new_service['volumes'].append(f"{abs_host_entity_path}:{CONTAINER_ENTITY_PATH}:ro")
-
-                # --- Add to Services Map ---
-                services_map[service_name] = new_service
-                overall_service_index += 1
-
-        # --- Write Output File ---
-        header = [
-            "# Generated by graphiti CLI",
-            "# Do not edit this file directly. Modify base-compose.yaml or project-specific mcp-config.yaml files instead.",
-            "",
-            "# --- Custom MCP Services Info ---",
-            f"# Default Ports: Assigned sequentially starting from {DEFAULT_PORT_START + 1}",
-            "#              Can be overridden by specifying 'port_default' in project's mcp-config.yaml.",
-        ]
-        try:
-            write_yaml_file(compose_data, output_compose_path, header=header)
-            print(f"Successfully generated '{output_compose_path}'.")
-        except Exception:
-            # Error already printed by write_yaml_file
-             sys.exit(1)
-
-    ```
-
-    _(Self-correction: Added explicit checks for file existence and type before loading YAML. Ensured paths passed to `update_registry_logic` are absolute. Handled potential non-existence of 'volumes' key after merge. Defaulted `group_id` to `project_name`.)_
-
-6.  **`graphiti_cli/commands.py` (Command Implementations):**
-    (This file contains the actual logic called by `main.py`. It imports helpers from `core.py` and `yaml_utils.py`).
-
-        ```python
-        # graphiti_cli/commands.py
-        import sys
-        import shutil
-        from pathlib import Path
-        import os
-        import re # For entity name validation
-
-        from . import core
-        from . import yaml_utils
-
-        # --- Docker Commands ---
-
-        def docker_up(detached: bool, log_level: str):
-        	core.ensure_docker_compose_file()
-        	core.ensure_dist_for_build()
-        	cmd = ["up", "--build", "--force-recreate"]
-        	core.run_docker_compose(cmd, log_level, detached)
-        	print(f"{core.GREEN}Docker compose up completed.{core.NC}")
-
-        def docker_down(log_level: str):
-        	core.ensure_docker_compose_file() # Needed for compose to find project
-        	core.run_docker_compose(["down"], log_level)
-        	print(f"{core.GREEN}Docker compose down completed.{core.NC}")
-
-        def docker_restart(detached: bool, log_level: str):
-        	print(f"{core.BOLD}Restarting Graphiti containers: first down, then up...{core.NC}")
-        	docker_down(log_level) # Run down first
-        	docker_up(detached, log_level) # Then run up
-        	print(f"{core.GREEN}Restart sequence completed.{core.NC}")
-
-        def docker_reload(service_name: str):
-        	core.ensure_docker_compose_file()
-        	print(f"{core.BOLD}Attempting to restart service '{core.CYAN}{service_name}{core.NC}'...{core.NC}")
-        	try:
-        		# Use check=True to let run_command handle the error printing on failure
-        		core.run_docker_compose(["restart", service_name], check=True)
-        		print(f"{core.GREEN}Service '{service_name}' restarted successfully.{core.NC}")
-        	except SystemExit: # run_command exits on error if check=True
-        		# Error message already printed by run_command via CalledProcessError handling
-        		print(f"{core.RED}Failed to restart service '{service_name}'. Check service name and if stack is running.{core.NC}")
-        		# No need to exit again, run_command already did
-
-        def docker_compose_generate():
-        	print(f"{core.BOLD}Generating docker-compose.yml from templates...{core.NC}")
-        	mcp_server_dir = core.get_mcp_server_dir()
-        	try:
-        		yaml_utils.generate_compose_logic(mcp_server_dir)
-        		# Success message printed within generate_compose_logic
-        	except Exception as e:
-        		print(f"{core.RED}Error: Failed to generate docker-compose.yml file: {e}{core.NC}")
-        		sys.exit(1)
-
-        # --- Project/File Management Commands ---
-
-        def init_project(project_name: str, target_dir: Path):
-            """
-            Initialize a Graphiti project.
-
-            Args:
-                project_name (str): Name of the project
-                target_dir (Path): Target directory for the project
-            """
-            # Basic validation
-            if not re.fullmatch(r'^[a-zA-Z0-9_-]+$', project_name):
-                print(f"{core.RED}Error: Invalid PROJECT_NAME '{project_name}'. Use only letters, numbers, underscores, and hyphens.{core.NC}")
-                sys.exit(1)
-
-            print(f"Initializing Graphiti project '{core.CYAN}{project_name}{core.NC}' in '{core.CYAN}{target_dir}{core.NC}'...")
-
-            # Create ai/graph directory structure
-            graph_dir = target_dir / "ai" / "graph"
-            try:
-                graph_dir.mkdir(parents=True, exist_ok=True)
-                print(f"Created directory structure: {core.CYAN}{graph_dir}{core.NC}")
-            except OSError as e:
-                print(f"{core.RED}Error creating directory structure {graph_dir}: {e}{core.NC}")
-                sys.exit(1)
-
-            # Create mcp-config.yaml in ai/graph directory
-            config_path = graph_dir / "mcp-config.yaml"
-            config_content = f"""# Configuration for project: {project_name}
-
-    services:
-      - id: {project_name}-main  # Service ID (used for default naming) # container_name: "custom-name" # Optional: Specify custom container name # port_default: 8001 # Optional: Specify custom host port
-        group_id: "{project_name}"  # Graph group ID
-        entity_dir: "entities"  # Relative path to entity definitions within ai/graph # environment: # Optional: Add non-secret env vars here # MY_FLAG: "true"
-    """
-    try:
-    target_dir.mkdir(parents=True, exist_ok=True) # Ensure target dir exists
-    config_path.write_text(config_content)
-    print(f"Created template {core.CYAN}{config_path}{core.NC}")
-    except OSError as e:
-    print(f"{core.RED}Error creating config file {config_path}: {e}{core.NC}")
-    sys.exit(1)
-
-            # Create entities directory within ai/graph
-            entities_dir = graph_dir / "entities"
-            try:
-                entities_dir.mkdir(exist_ok=True)
-                (entities_dir / ".gitkeep").touch(exist_ok=True) # Create or update timestamp
-                print(f"Created entities directory: {core.CYAN}{entities_dir}{core.NC}")
-            except OSError as e:
-                print(f"{core.RED}Error creating entities directory {entities_dir}: {e}{core.NC}")
-                sys.exit(1)
-
-            # Set up rules
-            setup_rules(project_name, target_dir) # Call the rules setup logic
-
-            # Update central registry
-            mcp_server_dir = core.get_mcp_server_dir()
-            registry_path = mcp_server_dir / "mcp-projects.yaml"
-            print(f"Updating central project registry: {core.CYAN}{registry_path}{core.NC}")
-            try:
-                # Ensure paths are absolute before passing
-                success = yaml_utils.update_registry_logic(
-                    registry_file=registry_path,
-                    project_name=project_name,
-                    root_dir=target_dir.resolve(),
-                    config_file=config_path.resolve(),
-                    enabled=True
-                )
-                if not success:
-                    print(f"{core.RED}Error: Failed to update project registry (see previous errors).{core.NC}")
-                    sys.exit(1)
-            except Exception as e:
-                print(f"{core.RED}Error updating project registry: {e}{core.NC}")
-                sys.exit(1)
-
-            print(f"{core.GREEN}Graphiti project '{project_name}' initialization complete.{core.NC}")
-
-
-        def setup_rules(project_name: str, target_dir: Path):
-        	"""Sets up the .cursor/rules directory and symlinks."""
-        	print(f"Setting up Graphiti Cursor rules for project '{core.CYAN}{project_name}{core.NC}' in {core.CYAN}{target_dir}{core.NC}")
-        	mcp_server_dir = core.get_mcp_server_dir()
-        	rules_source_dir = mcp_server_dir / "rules"
-        	templates_source_dir = rules_source_dir / "templates"
-        	cursor_rules_dir = target_dir / ".cursor" / "rules" / "graphiti"
-
-        	try:
-        		cursor_rules_dir.mkdir(parents=True, exist_ok=True)
-        		print(f"Created/verified rules directory: {core.CYAN}{cursor_rules_dir}{core.NC}")
-
-        		core_rule_src = rules_source_dir / "graphiti-mcp-core-rules.md"
-        		maint_rule_src = rules_source_dir / "graphiti-knowledge-graph-maintenance.md"
-        		schema_template_src = templates_source_dir / "project_schema_template.md"
-
-        		core_rule_link = cursor_rules_dir / "graphiti-mcp-core-rules.mdc"
-        		maint_rule_link = cursor_rules_dir / "graphiti-knowledge-graph-maintenance.mdc"
-        		target_schema_file = cursor_rules_dir / f"graphiti-{project_name}-schema.mdc"
-
-        		# Check source files
-        		missing_files = []
-        		if not core_rule_src.is_file(): missing_files.append(core_rule_src)
-        		if not maint_rule_src.is_file(): missing_files.append(maint_rule_src)
-        		if not schema_template_src.is_file(): missing_files.append(schema_template_src)
-        		if missing_files:
-        			print(f"{core.RED}Error: Source rule/template files not found:{core.NC}")
-        			for f in missing_files: print(f"  - {f}")
-        			sys.exit(1)
-
-        		# Create/Update symlinks using relative paths for better portability
-        		try:
-        			core_rel_path = os.path.relpath(core_rule_src.resolve(), start=cursor_rules_dir.resolve())
-        			maint_rel_path = os.path.relpath(maint_rule_src.resolve(), start=cursor_rules_dir.resolve())
-        		except ValueError:
-        			# Handle case where paths are on different drives (Windows) - fall back to absolute
-        			print(f"{core.YELLOW}Warning: Cannot create relative symlink paths (different drives?). Using absolute paths.{core.NC}")
-        			core_rel_path = core_rule_src.resolve()
-        			maint_rel_path = maint_rule_src.resolve()
-
-        		# Unlink if it exists and is not the correct link target
-        		if core_rule_link.is_symlink():
-        			if core_rule_link.readlink() != Path(core_rel_path):
-        				core_rule_link.unlink()
-        		elif core_rule_link.exists(): # It exists but isn't a symlink
-        			core_rule_link.unlink()
-
-        		if not core_rule_link.exists():
-        			core_rule_link.symlink_to(core_rel_path)
-        			print(f"Linking core rule: {core.CYAN}{core_rule_link.name}{core.NC} -> {core.CYAN}{core_rel_path}{core.NC}")
-        		else:
-        			print(f"Core rule link already exists: {core.CYAN}{core_rule_link.name}{core.NC}")
-
-
-        		if maint_rule_link.is_symlink():
-        			if maint_rule_link.readlink() != Path(maint_rel_path):
-        				maint_rule_link.unlink()
-        		elif maint_rule_link.exists():
-        			maint_rule_link.unlink()
-
-        		if not maint_rule_link.exists():
-        			maint_rule_link.symlink_to(maint_rel_path)
-        			print(f"Linking maintenance rule: {core.CYAN}{maint_rule_link.name}{core.NC} -> {core.CYAN}{maint_rel_path}{core.NC}")
-        		else:
-        			print(f"Maintenance rule link already exists: {core.CYAN}{maint_rule_link.name}{core.NC}")
-
-        		# Generate schema file from template
-        		if target_schema_file.exists():
-        			print(f"{core.YELLOW}Warning: Project schema file already exists, skipping template generation: {target_schema_file}{core.NC}")
-        		else:
-        			print(f"Generating template project schema file: {core.CYAN}{target_schema_file}{core.NC}")
-        			template_content = schema_template_src.read_text()
-        			schema_content = template_content.replace("__PROJECT_NAME__", project_name)
-        			target_schema_file.write_text(schema_content)
-
-        		print(f"{core.GREEN}Graphiti Cursor rules setup complete for project '{project_name}'.{core.NC}")
-
-        	except OSError as e:
-        		print(f"{core.RED}Error setting up rules: {e}{core.NC}")
-        		sys.exit(1)
-        	except Exception as e:
-        		print(f"{core.RED}An unexpected error occurred during rule setup: {e}{core.NC}")
-        		sys.exit(1)
-
-
-        def _to_pascal_case(snake_str: str) -> str:
-        	"""Converts snake_case or kebab-case to PascalCase."""
-        	parts = re.split('_|-', snake_str)
-        	return "".join(part.capitalize() for part in parts)
-
-        def create_entity_set(set_name: str, target_dir: Path):
-            """Creates a new directory and example entity file for an entity set within a project's ai/graph directory."""
-            # Validate SET_NAME format
-            if not re.fullmatch(r'^[a-zA-Z0-9_-]+$', set_name):
-                print(f"{core.RED}Error: Invalid SET_NAME '{set_name}'. Use only letters, numbers, underscores, and hyphens.{core.NC}")
-                sys.exit(1)
-
-            # Load project configuration from ai/graph directory
-            graph_dir = target_dir / "ai" / "graph"
-            config_path = graph_dir / "mcp-config.yaml"
-            if not config_path.is_file():
-                print(f"{core.RED}Error: Project configuration file not found: {config_path}{core.NC}")
-                print(f"Make sure the project has been initialized with 'graphiti init' first.")
-                sys.exit(1)
-
-            project_config = yaml_utils.load_yaml_file(config_path, safe=True)
-            if project_config is None:
-                print(f"{core.RED}Error: Failed to load project configuration from: {config_path}{core.NC}")
-                sys.exit(1)
-
-            # Validate project config structure
-            if 'services' not in project_config or not isinstance(project_config['services'], list) or not project_config['services']:
-                print(f"{core.RED}Error: Invalid or missing 'services' section in project configuration: {config_path}{core.NC}")
-                sys.exit(1)
-
-            # Extract the entity directory name from the first service entry
-            entity_dir_name = project_config.get('services', [{}])[0].get('entity_dir', 'entities')
-
-            # Calculate paths - use graph_dir as base
-            project_entity_base_dir = graph_dir / entity_dir_name
-            new_set_dir = project_entity_base_dir / set_name
-
-            if new_set_dir.exists():
-                print(f"{core.RED}Error: Entity type set '{set_name}' already exists at: {new_set_dir}{core.NC}")
-                sys.exit(1)
-
-            try:
-                new_set_dir.mkdir(parents=True)
-                print(f"Created entity type set directory: {core.CYAN}{new_set_dir}{core.NC}")
-
-                class_name = _to_pascal_case(set_name) + "Entity" # Add suffix convention
-                # Use set_name for lowercase replacements, class_name for class definition
-                entity_file_path = new_set_dir / f"{class_name}.py" # Name file after class
-
-                if not example_template_path.is_file():
-                    print(f"{core.YELLOW}Warning: Template file not found: {example_template_path}{core.NC}")
-                    print("Creating a minimal entity file instead.")
-                    minimal_content = f"""from pydantic import BaseModel, Field
-
-        class {class_name}(BaseModel):
-        	\"\"\"Example entity for the '{set_name}' set.\"\"\"
-
-        	example_field: str = Field(
-        		...,
-        		description='An example field.',
-        	)
-        """
-                    entity_file_path.write_text(minimal_content)
-                else:
-                    template_content = example_template_path.read_text()
-                    # Perform replacements carefully
-                    content = template_content.replace("class Product(BaseModel):", f"class {class_name}(BaseModel):")
-                    # Replace descriptions, trying to be specific
-                    content = content.replace("A Product represents", f"A {class_name} represents")
-                    content = content.replace("about Products mentioned", f"about {class_name} entities mentioned")
-                    content = content.replace("product names", f"{set_name} names")
-                    content = content.replace("the product belongs", f"the {set_name} belongs")
-                    content = content.replace("description of the product", f"description of the {set_name}")
-                    # Add more replacements if needed based on the template content
-
-                    entity_file_path.write_text(content)
-                    print(f"Created entity file using template: {core.CYAN}{entity_file_path}{core.NC}")
-
-                print(f"{core.GREEN}Entity set '{set_name}' successfully created.{core.NC}")
-
-            except OSError as e:
-                print(f"{core.RED}Error creating entity set '{set_name}': {e}{core.NC}")
-                sys.exit(1)
-            except Exception as e:
-                print(f"{core.RED}An unexpected error occurred creating entity set '{set_name}': {e}{core.NC}")
-                sys.exit(1)
-
-        ```
-
-This completes the `commands.py` file, providing the implementation logic for all the commands defined in `main.py`. Each function orchestrates the necessary steps, calling helpers from `core.py` for process execution and path management, and `yaml_utils.py` for configuration file handling. Error handling is included using `try...except` blocks and checking subprocess results.
-````
-
-## File: .ai/plans/refactor-cli-plan.md
-````markdown
-Okay, here is a step-by-step implementation plan for migrating the `graphiti` Bash script to a Python CLI tool, based on the agreed-upon architecture using Typer. This plan is designed for execution by an expert AI implementation agent.
-
-**Objective:** Replace the existing `scripts/graphiti` Bash script with a new Python-based CLI tool located in `graphiti_cli/`, managed via `pyproject.toml` and using Typer, `ruamel.yaml`, `subprocess`, and `pathlib`. The new tool should replicate the functionality and command-line interface of the original script while integrating the logic of `_yaml_helper.py` and `generate_compose.py`.
-
-**Assumptions:**
-
-1.  The execution agent has write access to the filesystem within the repository.
-2.  Python 3.10+ and `pip` (or `uv`) are available in the execution environment.
-3.  Docker and Docker Compose V2 are installed and accessible.
-4.  The existing code provided (including the proposed Python architecture snippets) is accurate and complete for the migration task.
-5.  The agent understands how to install Python packages using `pip install -e .` based on `pyproject.toml`.
-
-**Potential Risks:**
-
-1.  **Subtle Behavioral Differences:** Differences in how subprocesses are handled or paths are resolved between Bash and Python could lead to subtle behavioral changes. Thorough testing is crucial.
-2.  **Error Handling:** Python's error handling might expose issues previously masked in the Bash script, or new error conditions might arise.
-3.  **Dependency Conflicts:** Ensure CLI dependencies in `pyproject.toml` don't conflict with server dependencies if installed in the same environment.
-4.  **Path Resolution:** Consistency in handling absolute vs. relative paths, especially for symlinks and configuration files, needs careful implementation.
-
-**Implementation Plan:**
-
-**Phase 1: Setup and Project Structure** ✅ COMPLETED
-
-1.  **Create CLI Package Directory:** ✅ COMPLETED
-    *   Action: Create a new directory named `graphiti_cli` within the `mcp_server` directory (not at the repository root as initially planned).
-    *   Files Involved: N/A (creates `mcp_server/graphiti_cli/`)
-    *   Acceptance: The `mcp_server/graphiti_cli/` directory exists.
-2.  **Create Initial Python Files:** ✅ COMPLETED
-    *   Action: Create the following empty Python files within the `mcp_server/graphiti_cli/` directory:
-        *   `__init__.py`
-        *   `main.py`
-        *   `core.py`
-        *   `commands.py`
-        *   `yaml_utils.py`
-    *   Files Involved: `mcp_server/graphiti_cli/__init__.py`, `mcp_server/graphiti_cli/main.py`, `mcp_server/graphiti_cli/core.py`, `mcp_server/graphiti_cli/commands.py`, `mcp_server/graphiti_cli/yaml_utils.py`
-    *   Acceptance: All five specified Python files exist within `mcp_server/graphiti_cli/` and are initially empty.
-3.  **Update `pyproject.toml`:** ✅ COMPLETED
-    *   Action: Modify the `mcp_server/pyproject.toml` file.
-        *   Add `typer[all]>=0.9.0` and `python-dotenv>=1.0.0` to the `[project.dependencies]` list.
-        *   Add the `[project.scripts]` section as defined in the architecture proposal (`graphiti = "graphiti_cli.main:app"`).
-        *   Add the `[build-system]` section.
-        *   Add the `[tool.setuptools.packages.find]` section to explicitly include only the `graphiti_cli` package.
-    *   Files Involved: `mcp_server/pyproject.toml`
-    *   Acceptance: `pyproject.toml` contains the new dependencies, the `[project.scripts]` entry point, and proper package configuration.
-4.  **Install Dependencies:** ✅ COMPLETED
-    *   Action: Run `pip install -e .` in the `mcp_server` directory. This installs the necessary dependencies (Typer, etc.) and makes the `graphiti` command (defined in `project.scripts`) available in the environment based on the (currently empty) `graphiti_cli` package.
-    *   Files Involved: `mcp_server/pyproject.toml`, Python environment `site-packages`.
-    *   Acceptance: The command runs without errors. The package is successfully installed in development mode with all dependencies.
-    *   Notes: The `graphiti` command currently still points to the original Bash script since our Python implementation files are empty.
-
-**Phase 2: Implement Core and YAML Utilities** ✅ COMPLETED
-
-5.  **Implement Core Utilities (`core.py`):** ✅ COMPLETED
-    *   Action: Populate `mcp_server/graphiti_cli/core.py` with the Python code provided in the architecture proposal. This includes:
-        *   ANSI color constants.
-        *   `LogLevel` enum.
-        *   `_find_repo_root()`, `get_repo_root()`, `get_mcp_server_dir()` functions (ensure robust path finding).
-        *   `run_command()` function for executing subprocesses reliably.
-        *   Additional utilities like `run_docker_compose()`, `ensure_docker_compose_file()`, and `ensure_dist_for_build()`.
-    *   Files Involved: `mcp_server/graphiti_cli/core.py`
-    *   Acceptance: The file contains the specified functions and constants. Implemented with proper type hints, docstrings, and error handling.
-6.  **Implement YAML Utilities (`yaml_utils.py`):** ✅ COMPLETED
-    *   Action: Populate `mcp_server/graphiti_cli/yaml_utils.py` with the Python code provided in the architecture proposal. This integrates logic from the old helper scripts:
-        *   YAML instance initializations (`yaml_rt`, `yaml_safe`).
-        *   `load_yaml_file()`, `write_yaml_file()` helper functions.
-        *   `update_registry_logic()` function (ported from `_yaml_helper.py`).
-        *   `generate_compose_logic()` function (ported from `generate_compose.py`). Ensure it uses constants/helpers from `core.py` where appropriate.
-    *   Files Involved: `mcp_server/graphiti_cli/yaml_utils.py`
-    *   Acceptance: The file contains the specified functions. Implemented with proper type hints, docstrings, and error handling.
-
-**Phase 3: Implement Command Logic** ✅ COMPLETED
-
-7.  **Implement Command Logic (`commands.py`):** ✅ COMPLETED
-    *   Action: Populate `mcp_server/graphiti_cli/commands.py` with the Python functions corresponding to each CLI command (`docker_up`, `docker_down`, `docker_restart`, `docker_reload`, `docker_compose_generate`, `init_project`, `setup_rules`, `create_entity_set`). Use the provided code from the architecture proposal.
-        *   Ensure these functions correctly import and call helpers from `core.py` and `yaml_utils.py`.
-        *   Carefully translate file system operations (symlinking in `setup_rules`, directory/file creation in `init_project` and `create_entity_set`) using `pathlib` and `shutil`.
-        *   Implement the `ensure_docker_compose_file()` and `ensure_dist_for_build()` logic by calling the relevant functions in `core.py`.
-    *   Files Involved: `mcp_server/graphiti_cli/commands.py`, `mcp_server/graphiti_cli/core.py`, `mcp_server/graphiti_cli/yaml_utils.py`
-    *   Acceptance: The file contains functions for each command. Code compiles and logical structure matches the Bash script's intent for each command.
-
-**Phase 4: Define CLI Interface** ✅ COMPLETED
-
-8.  **Define Typer App (`main.py`):** ✅ COMPLETED
-    *   Action: Populate `mcp_server/graphiti_cli/main.py` with the Typer application setup, callback, and command definitions as provided in the architecture proposal.
-        *   Instantiate `typer.Typer()`.
-        *   Define the `main_callback` to find the repo root.
-        *   Define each command (`@app.command()`) with appropriate arguments (`typer.Argument`) and options (`typer.Option`) using `Annotated`.
-        *   Ensure each command function in `main.py` calls the corresponding implementation function in `commands.py`.
-    *   Files Involved: `mcp_server/graphiti_cli/main.py`, `mcp_server/graphiti_cli/commands.py`
-    *   Acceptance: The file contains the Typer app definition. Running `graphiti --help` should display the list of commands and their options, matching the interface of the old script.
-
-**Phase 5: Cleanup** 🕒 PENDING
-
-9.  **Remove Old Scripts:**
-    *   Action: Delete the following files:
-        *   `mcp_server/scripts/graphiti` (The original Bash script)
-        *   `mcp_server/scripts/_yaml_helper.py`
-        *   `mcp_server/generate_compose.py`
-    *   Files Involved: `mcp_server/scripts/graphiti`, `mcp_server/scripts/_yaml_helper.py`, `mcp_server/generate_compose.py`
-    *   Acceptance: The specified files no longer exist in the repository.
-
-10. **Verify Global Command Path:** (NEW STEP) ✅ COMPLETED
-    *   Action: Ensure the `graphiti` command executed from the terminal correctly points to the new Python CLI entry point installed by `pip install -e .` (or equivalent).
-        *   Run `which graphiti` (or `type graphiti` depending on shell) to identify the exact script being executed.
-        *   Verify this path corresponds to the Python environment where the `mcp-server` package was installed editable.
-        *   Check common `PATH` directories (e.g., `/usr/local/bin`, `~/.local/bin`, `~/bin`) for any older conflicting `graphiti` files or symlinks and remove them if found.
-    *   Files Involved: Files/symlinks in system `PATH` directories, Python environment's `bin` directory.
-    *   Acceptance: The `which graphiti` command resolves to the correct entry point script created by the package installation. No conflicting executables are found earlier in the `PATH`.
-
-**Phase 6: Verification and Testing** 🔄 IN PROGRESS (Requires Re-verification After Cleanup)
-
-11. **Functional Testing (Using Global Command):** (REVISED STEP)
-    *   Action: Execute the *globally installed* `graphiti` command (verified in Step 10) for each subcommand and option combination. Verify the outputs and side effects are correct and match the behavior tested previously via `python -m ...`. Re-run key tests:
-        *   `graphiti --help` (Verify Python CLI help output)
-        *   `graphiti compose` -> Check `docker-compose.yml` generation.
-        *   `graphiti up --log-level debug` -> Check build configuration message (should now correctly detect published package), check container logs for DEBUG level.
-        *   `graphiti down`
-        *   `graphiti init test-py-proj-global ./temp_test_py_proj_global`
-        *   `graphiti entity my-global-set ./temp_test_py_proj_global`
-        *   `graphiti rules test-py-proj-global ./temp_test_py_proj_global`
-        *   `graphiti restart`
-        *   `graphiti reload <service_name>`
-    *   Files Involved: All CLI files, `mcp-projects.yaml`, `docker-compose.yml`, Docker environment, test project directories.
-    *   Acceptance Criteria:
-        *   All commands execute using the *global* `graphiti` entry point without Python errors.
-        *   The build configuration check (`ensure_dist_for_build`) now correctly identifies the published package based on the saved `pyproject.toml`.
-        *   File system and Docker operations are successful and produce the expected results.
-        *   Outputs match those observed during module-based testing.
-
-**Next Steps:**
-1. Execute Phase 5: Cleanup (Steps 9 & 10).
-2. Re-run Phase 6: Verification and Testing (Step 11) using the global command.
-
-## Latest Progress Update
-
-- Successfully tested the `compose` command:
-  - The command generated a new `docker-compose.yml` file based on `base-compose.yaml` and `mcp-projects.yaml`.
-  - MD5 checksum comparisons confirm that the generated file is identical to previous outputs.
-  - Error handling was validated by simulating scenarios with a missing and corrupted `base-compose.yaml` file.
-- This progress is part of Phase 6: Verification and Testing of the new Python CLI tool.
-- Next planned action: Test the `up` command to start Docker containers.
-
-## Docker Environment Management Progress (April 2025)
-
-- Successfully tested the Docker environment management commands:
-  - Fixed a critical environment variable issue by adding `MCP_PORT=8000` to the `.env` file
-  - Tested the `down` command to ensure it properly stops and removes all containers
-  - Tested the `up` command with the following variants:
-    - Basic usage to start containers with default settings
-    - Detached mode (`-d` flag) to run containers in the background
-    - Custom logging with `--log-level debug` option
-  - Verified that the Docker Compose environment variables are correctly passed
-  - Confirmed that the build preparation logic works as expected with local wheel files
-  
-- Findings and observations:
-  - The CLI successfully regenerates the `docker-compose.yml` file before each operation
-  - Proper error handling is in place for warnings about missing configuration files
-  - Environment variable management works correctly for both CLI and container settings
-  - The commands match the intended behavior from the original Bash script
-
-- Next steps:
-  - Test the `restart` command (combines `down` and `up` operations)
-  - Test the `reload` command (for restarting individual services)
-  - Complete Phase 6: Verification and Testing
-  - Proceed to Phase 5: Cleanup to remove the original scripts
-````
-
 ## File: entity_types/base/preferences.py
-````python
+```python
 """Preference entity type for Graphiti MCP Server."""
 
 from pydantic import BaseModel, Field
@@ -1105,10 +110,10 @@ class Preference(BaseModel):
         ...,
         description='Brief description of the preference. Only use information mentioned in the context to write this description.',
     )
-````
+```
 
 ## File: entity_types/base/procedures.py
-````python
+```python
 """Procedure entity type for Graphiti MCP Server."""
 
 from pydantic import BaseModel, Field
@@ -1133,10 +138,10 @@ class Procedure(BaseModel):
         ...,
         description='Brief description of the procedure. Only use information mentioned in the context to write this description.',
     )
-````
+```
 
 ## File: entity_types/base/requirements.py
-````python
+```python
 """Requirement entity type for Graphiti MCP Server."""
 
 from pydantic import BaseModel, Field
@@ -1170,595 +175,10 @@ class Requirement(BaseModel):
     )
 
 # No need for explicit registration - will be auto-registered
-````
-
-## File: entity_types/candidates/Candidate.py
-````python
-"""Candidate entity type for Graphiti MCP Server."""
-
-from typing import List, Optional
-from pydantic import BaseModel, Field
-
-class Candidate(BaseModel):
-    """
-    ## AI Persona
-    You are a knowledgeable recruitment specialist who extracts candidate profile information from text.
-    
-    ## Task Definition
-    Extract core information about a candidate from the provided text, including their name, 
-    contact details, current position, location, and a high-level summary of their background.
-    
-    ## Context
-    This entity represents a job candidate in the recruitment process. It captures the essential 
-    identifying and contact information for a person applying for jobs or being considered for 
-    positions. This information is typically found in resumes, LinkedIn profiles, or candidate 
-    databases.
-    
-    ## Instructions
-    1. Extract the candidate's full name as it appears in the text.
-    2. Identify all contact information (email, phone, LinkedIn URL).
-    3. Extract their current role/title and company if available.
-    4. Note their current location (city, state, country).
-    5. Capture years of experience if explicitly mentioned.
-    6. Create a brief summary of their professional background.
-    7. If information for any field is not present, leave it as None.
-    8. Do not fabricate or infer information that is not stated or strongly implied in the text.
-    
-    ## Output Format
-    A Candidate entity with the extracted fields populated according to the information available.
-    """
-    
-    name: str = Field(
-        ...,
-        description="The candidate's full name (first and last name, and middle name if available)."
-    )
-    
-    email: Optional[str] = Field(
-        None, 
-        description="The candidate's email address for contact purposes."
-    )
-    
-    phone: Optional[str] = Field(
-        None, 
-        description="The candidate's phone number for contact purposes."
-    )
-    
-    linkedin_url: Optional[str] = Field(
-        None, 
-        description="URL to the candidate's LinkedIn profile."
-    )
-    
-    current_title: Optional[str] = Field(
-        None, 
-        description="The candidate's current job title or position."
-    )
-    
-    current_company: Optional[str] = Field(
-        None, 
-        description="The company where the candidate is currently employed."
-    )
-    
-    location: Optional[str] = Field(
-        None, 
-        description="The candidate's current location, typically city and state/country."
-    )
-    
-    years_of_experience: Optional[int] = Field(
-        None, 
-        description="Total years of professional experience the candidate has, if explicitly stated."
-    )
-    
-    headline: Optional[str] = Field(
-        None, 
-        description="A short professional headline or title the candidate uses to describe themselves."
-    )
-    
-    summary: Optional[str] = Field(
-        None, 
-        description="A brief summary of the candidate's background, expertise, and key qualifications."
-    ) 
-
-# No need for explicit registration - will be auto-registered
-````
-
-## File: entity_types/candidates/Certification.py
-````python
-"""Certification entity type for Graphiti MCP Server."""
-
-from typing import List, Optional
-from pydantic import BaseModel, Field
-
-class Certification(BaseModel):
-    """
-    ## AI Persona
-    You are a professional certification analyst who specializes in identifying and validating industry credentials.
-    
-    ## Task Definition
-    Extract information about professional certifications, licenses, or credentials mentioned in the text, 
-    including the certification name, issuing organization, date, and validity status.
-    
-    ## Context
-    This entity represents a professional certification, license, or credential that a candidate has earned. 
-    Each certification should be captured as a separate entity. These are typically found in dedicated 
-    "Certifications" or "Professional Development" sections of resumes, but may also appear in summaries 
-    or alongside education details.
-    
-    ## Instructions
-    1. Extract the full, official name of the certification or credential.
-    2. Identify the organization or body that issued the certification.
-    3. Determine when the certification was earned or issued.
-    4. Note the expiration date or validity period if mentioned.
-    5. Capture any identification numbers, versions, or specific levels of the certification.
-    6. Record related skills or technologies associated with the certification if mentioned.
-    7. Note if the certification is highlighted as particularly significant or relevant.
-    8. If information for any field is not present, leave it as None.
-    9. Create a separate Certification entity for each distinct credential mentioned.
-    
-    ## Output Format
-    A Certification entity with all available fields populated based on the information provided in the text.
-    """
-    
-    name: str = Field(
-        ...,
-        description="The full, official name of the certification or credential."
-    )
-    
-    issuing_organization: Optional[str] = Field(
-        None, 
-        description="The name of the organization or body that issued the certification."
-    )
-    
-    issue_date: Optional[str] = Field(
-        None, 
-        description="When the certification was earned or issued (format: YYYY-MM or YYYY)."
-    )
-    
-    expiration_date: Optional[str] = Field(
-        None, 
-        description="When the certification expires, if applicable (format: YYYY-MM or YYYY)."
-    )
-    
-    is_active: Optional[bool] = Field(
-        None, 
-        description="Whether the certification is currently active/valid (True) or expired (False)."
-    )
-    
-    credential_id: Optional[str] = Field(
-        None, 
-        description="Any identification number, version, or specific identifier for the certification."
-    )
-    
-    credential_url: Optional[str] = Field(
-        None, 
-        description="URL to verify or view the certification if mentioned."
-    )
-    
-    related_skills: Optional[List[str]] = Field(
-        None, 
-        description="Skills or technologies directly associated with this certification."
-    )
-    
-    description: Optional[str] = Field(
-        None, 
-        description="Any additional details or context about the certification as provided in the source text."
-    )
-
-# No need for explicit registration - will be auto-registered
-````
-
-## File: entity_types/candidates/Education.py
-````python
-"""Education entity type for Graphiti MCP Server."""
-
-from typing import List, Optional
-from pydantic import BaseModel, Field
-from enum import Enum
-
-class DegreeLevel(str, Enum):
-    HIGH_SCHOOL = "high_school"
-    ASSOCIATE = "associate"
-    BACHELOR = "bachelor"
-    MASTER = "master"
-    DOCTORATE = "doctorate"
-    CERTIFICATE = "certificate"
-    DIPLOMA = "diploma"
-    OTHER = "other"
-
-class Education(BaseModel):
-    """
-    ## AI Persona
-    You are an educational background analyst who specializes in academic credential verification.
-    
-    ## Task Definition
-    Extract and organize information about a candidate's educational background, including institutions attended, 
-    degrees earned, areas of study, and relevant academic achievements.
-    
-    ## Context
-    This entity represents a single educational qualification or program completed by a candidate. Each degree, 
-    certificate, or formal educational program should be captured as a separate Education entity. These entries 
-    typically appear in the "Education" section of resumes, CVs, or professional profiles.
-    
-    ## Instructions
-    1. Extract the name of the educational institution (university, college, school).
-    2. Identify the degree level and type (Bachelor's, Master's, PhD, Certificate, etc.).
-    3. Determine the field of study, major, or specialization.
-    4. Extract the start and completion dates (year is typically sufficient).
-    5. Note any academic achievements mentioned (GPA, honors, class rank, etc.).
-    6. Capture relevant coursework if it's highlighted and relevant to the candidate's career goals.
-    7. Record any notable projects, thesis topics, or research work if mentioned.
-    8. If information for any field is not present, leave it as None.
-    9. Create a separate Education entity for each degree or educational program mentioned.
-    
-    ## Output Format
-    An Education entity with all available fields populated based on the information in the text.
-    """
-    
-    institution: str = Field(
-        ...,
-        description="The name of the educational institution (university, college, school)."
-    )
-    
-    degree_level: DegreeLevel = Field(
-        ...,
-        description="The level of the degree or educational qualification."
-    )
-    
-    degree_name: Optional[str] = Field(
-        None, 
-        description="The specific name of the degree (e.g., 'Bachelor of Science', 'Master of Business Administration')."
-    )
-    
-    field_of_study: Optional[str] = Field(
-        None, 
-        description="The major, specialization, or field of study."
-    )
-    
-    start_date: Optional[str] = Field(
-        None, 
-        description="When the candidate started this educational program (typically just the year)."
-    )
-    
-    end_date: Optional[str] = Field(
-        None, 
-        description="When the candidate completed this educational program (or expected completion date)."
-    )
-    
-    is_completed: Optional[bool] = Field(
-        None, 
-        description="Whether the education has been completed (True) or is still in progress (False)."
-    )
-    
-    gpa: Optional[str] = Field(
-        None, 
-        description="The Grade Point Average or academic score achieved, if mentioned."
-    )
-    
-    honors: Optional[List[str]] = Field(
-        None, 
-        description="Any academic honors, distinctions, or awards received during this education."
-    )
-    
-    relevant_coursework: Optional[List[str]] = Field(
-        None, 
-        description="Specific courses highlighted as relevant to the candidate's career goals."
-    )
-    
-    projects: Optional[List[str]] = Field(
-        None, 
-        description="Notable academic projects, research, or thesis work completed during this education."
-    )
-    
-    location: Optional[str] = Field(
-        None, 
-        description="The location (city, state, country) of the educational institution."
-    )
-    
-    summary: str = Field(
-        default="Education at an institution",
-        description="A brief summary of this education record for entity node representation."
-    )
-
-# No need for explicit registration - will be auto-registered
-````
-
-## File: entity_types/candidates/Insight.py
-````python
-"""Insight entity type for Graphiti MCP Server."""
-
-from typing import List, Optional
-# Remove datetime import since we'll use string representation instead
-# from datetime import datetime
-from pydantic import BaseModel, Field
-from enum import Enum
-
-class InsightType(str, Enum):
-    BEHAVIORAL = "behavioral"
-    TECHNICAL = "technical"
-    CULTURAL = "cultural"
-    COMMUNICATION = "communication"
-    MOTIVATION = "motivation"
-    LEADERSHIP = "leadership"
-    GROWTH = "growth"
-    OTHER = "other"
-
-class InsightSource(str, Enum):
-    INTERVIEW = "interview"
-    RESUME_ANALYSIS = "resume_analysis"
-    PORTFOLIO_REVIEW = "portfolio_review"
-    REFERENCE_CHECK = "reference_check"
-    SKILL_ASSESSMENT = "skill_assessment"
-    CONVERSATION = "conversation"
-    OTHER = "other"
-
-class Insight(BaseModel):
-    """
-    ## AI Persona
-    You are a perceptive talent evaluator who identifies unique insights about candidates beyond what's explicitly stated in their resume or profile.
-    
-    ## Task Definition
-    Extract or document meaningful insights about candidates that provide deeper understanding of their abilities, potential fit, strengths, or areas for development.
-    
-    ## Context
-    This entity represents a unique insight discovered about a candidate during the recruitment process. Insights go beyond explicit resume data and capture observations, patterns, 
-    or conclusions that might influence hiring decisions. These could come from interviews, conversations, resume analysis, or other interactions with the candidate.
-    
-    ## Instructions
-    1. Identify meaningful insights that provide deeper understanding about the candidate.
-    2. Categorize the insight by type (behavioral, technical, cultural, etc.).
-    3. Specify the source of the insight (interview, resume analysis, conversation, etc.).
-    4. Provide a clear, specific description of the insight with supporting context.
-    5. Note the date when the insight was observed or identified.
-    6. Assess the relevance of this insight to specific roles or positions if applicable.
-    7. Record any recommendations or actions that should be taken based on this insight.
-    8. If information for any field is not present, leave it as None or use the appropriate default.
-    9. Do not fabricate insights; only record observations with sufficient supporting evidence.
-    
-    ## Output Format
-    An Insight entity with description, type, source, and other available attributes populated based on the information observed.
-    """
-    
-    candidate_name: str = Field(
-        ...,
-        description="The name of the candidate this insight is about."
-    )
-    
-    description: str = Field(
-        ...,
-        description="A clear, specific description of the insight discovered about the candidate."
-    )
-    
-    insight_type: InsightType = Field(
-        ...,
-        description="The category or type of insight (behavioral, technical, cultural, communication, motivation, leadership, growth, other)."
-    )
-    
-    source: InsightSource = Field(
-        ...,
-        description="The source or context where this insight was observed or identified."
-    )
-    
-    date_observed: Optional[str] = Field(
-        None, 
-        description="The date when this insight was observed or identified (format: YYYY-MM-DD)."
-    )
-    
-    supporting_evidence: Optional[str] = Field(
-        None, 
-        description="Specific examples, quotes, or observations that support this insight."
-    )
-    
-    relevance_to_roles: Optional[List[str]] = Field(
-        None, 
-        description="Specific roles or positions for which this insight is particularly relevant."
-    )
-    
-    recommendations: Optional[str] = Field(
-        None, 
-        description="Any recommendations or actions that should be taken based on this insight."
-    )
-    
-    confidence_level: Optional[int] = Field(
-        None, 
-        description="Subjective confidence in this insight on a scale of 1-5, with 5 being highest confidence."
-    )
-    
-    tags: Optional[List[str]] = Field(
-        None, 
-        description="Keywords or tags that can be used to categorize or search for this insight."
-    )
-
-# No need for explicit registration - will be auto-registered
-````
-
-## File: entity_types/candidates/Skill.py
-````python
-"""Skill entity type for Graphiti MCP Server."""
-
-from typing import List, Optional
-from pydantic import BaseModel, Field
-from enum import Enum
-
-class SkillType(str, Enum):
-    TECHNICAL = "technical"
-    SOFT = "soft"
-    LANGUAGE = "language"
-    TOOL = "tool"
-    PLATFORM = "platform"
-    METHODOLOGY = "methodology"
-    DOMAIN = "domain"
-    OTHER = "other"
-
-class SkillLevel(str, Enum):
-    BEGINNER = "beginner"
-    INTERMEDIATE = "intermediate"
-    ADVANCED = "advanced"
-    EXPERT = "expert"
-    UNKNOWN = "unknown"
-
-class Skill(BaseModel):
-    """
-    ## AI Persona
-    You are a skills assessment specialist who identifies and categorizes professional skills from candidate information.
-    
-    ## Task Definition
-    Extract skills mentioned in the text, categorize them by type, and assess proficiency level when possible.
-    
-    ## Context
-    This entity represents a specific professional skill possessed by a candidate. Skills can include technical abilities 
-    (programming languages, tools, platforms), soft skills (communication, leadership), language proficiencies, methodologies, 
-    and domain expertise. Skills are typically listed in dedicated "Skills" sections of resumes, but may also be mentioned 
-    throughout work experience descriptions, summaries, or project sections.
-    
-    ## Instructions
-    1. Identify distinct skills mentioned in the text.
-    2. Categorize each skill by its type (technical, soft, language, tool, platform, methodology, domain, other).
-    3. Determine the proficiency level if explicitly stated or strongly implied.
-    4. Extract any years of experience with the skill if mentioned.
-    5. Note if the skill is explicitly highlighted as a core or key skill.
-    6. For technical skills, identify related technologies or platforms if mentioned.
-    7. Create a separate Skill entity for each distinct skill identified.
-    8. Do not infer skills that aren't explicitly mentioned or strongly implied.
-    9. If information for any field is not present, leave it as None or use the appropriate default.
-    
-    ## Output Format
-    A Skill entity with name, type, and other available attributes populated based on the information in the text.
-    """
-    
-    name: str = Field(
-        ...,
-        description="The name of the skill (e.g., 'Python', 'Project Management', 'Data Analysis')."
-    )
-    
-    skill_type: SkillType = Field(
-        ...,
-        description="The category or type of skill (technical, soft, language, tool, platform, methodology, domain, other)."
-    )
-    
-    level: Optional[SkillLevel] = Field(
-        None, 
-        description="The candidate's proficiency level with this skill if mentioned."
-    )
-    
-    years_experience: Optional[int] = Field(
-        None, 
-        description="Number of years of experience with this skill, if explicitly stated."
-    )
-    
-    is_core_skill: Optional[bool] = Field(
-        None, 
-        description="Whether this is highlighted as a core or key skill for the candidate."
-    )
-    
-    related_technologies: Optional[List[str]] = Field(
-        None, 
-        description="For technical skills, other technologies, tools, or platforms mentioned in connection with this skill."
-    )
-    
-    description: Optional[str] = Field(
-        None, 
-        description="Any additional descriptions or context about the skill as provided in the source text."
-    )
-
-# No need for explicit registration - will be auto-registered
-````
-
-## File: entity_types/candidates/WorkExperience.py
-````python
-"""WorkExperience entity type for Graphiti MCP Server."""
-
-from typing import List, Optional
-from pydantic import BaseModel, Field
-
-class WorkExperience(BaseModel):
-    """
-    ## AI Persona
-    You are a career history analyst who specializes in extracting work experience details.
-    
-    ## Task Definition
-    Extract comprehensive information about a candidate's work experience from the provided text, 
-    including job details, responsibilities, achievements, and technologies used.
-    
-    ## Context
-    This entity represents a single job position or role held by a candidate. Each work experience
-    should be captured as a separate entity. This information is typically found in the "Work Experience"
-    or "Professional Experience" sections of resumes, CVs, or professional profiles.
-    
-    ## Instructions
-    1. Extract the job title or position held by the candidate.
-    2. Identify the name of the company or organization where they worked.
-    3. Determine the start and end dates of employment (current position may not have an end date).
-    4. Note the location where they worked (city, state, country).
-    5. Capture key responsibilities and duties performed in the role.
-    6. Extract notable achievements, projects, or accomplishments.
-    7. Identify technologies, tools, or methodologies used, if mentioned.
-    8. Note any promotions or role changes within the same company, if applicable.
-    9. If information for any field is not present, leave it as None.
-    10. Create a separate WorkExperience entity for each position mentioned.
-    
-    ## Output Format
-    A WorkExperience entity with all available fields populated based on the information in the text.
-    """
-    
-    job_title: str = Field(
-        ...,
-        description="The title or position held by the candidate."
-    )
-    
-    company_name: str = Field(
-        ...,
-        description="The name of the company or organization where the candidate worked."
-    )
-    
-    start_date: Optional[str] = Field(
-        None, 
-        description="When the candidate started this role (e.g., 'Jan 2020', 'March 2018', '2015')."
-    )
-    
-    end_date: Optional[str] = Field(
-        None, 
-        description="When the candidate ended this role (e.g., 'Present', 'Current', 'Dec 2022')."
-    )
-    
-    is_current: Optional[bool] = Field(
-        None, 
-        description="Whether this is the candidate's current position."
-    )
-    
-    location: Optional[str] = Field(
-        None, 
-        description="Where the job was located (city, state, country)."
-    )
-    
-    responsibilities: Optional[List[str]] = Field(
-        None, 
-        description="Key responsibilities, duties, or tasks performed in this role."
-    )
-    
-    achievements: Optional[List[str]] = Field(
-        None, 
-        description="Notable achievements, accomplishments, or successful projects in this role."
-    )
-    
-    technologies_used: Optional[List[str]] = Field(
-        None, 
-        description="Technologies, tools, frameworks, languages, or methodologies used in this role."
-    )
-    
-    description: Optional[str] = Field(
-        None, 
-        description="A general description or summary of the role as provided in the source text."
-    )
-    
-    summary: str = Field(
-        default="Work experience at a company",
-        description="A brief summary of this work experience for entity node representation."
-    )
-
-# No need for explicit registration - will be auto-registered
-````
+```
 
 ## File: entity_types/example/company_entity.py
-````python
+```python
 """Definition for a Company entity type."""
 
 from pydantic import BaseModel, Field
@@ -1793,10 +213,10 @@ class Company(BaseModel):
         default=None,
         description='The industry the company operates in (e.g., "Technology", "Finance"), if mentioned.',
     )
-````
+```
 
 ## File: entity_types/example/custom_entity_example.py
-````python
+```python
 """Example of how to create a custom entity type for Graphiti MCP Server."""
 
 from pydantic import BaseModel, Field
@@ -1837,10 +257,10 @@ class Product(BaseModel):
         ...,
         description='The category the product belongs to (e.g., "Electronics", "Software", "Service") based on the text.',
     )
-````
+```
 
 ## File: entity_types/graphiti/ArchitecturalPattern.py
-````python
+```python
 """Definition of the ArchitecturalPattern entity type for Graphiti."""
 
 from pydantic import BaseModel, Field
@@ -1890,10 +310,10 @@ class ArchitecturalPatternEntity(BaseModel):
         None,
         description='System components or modules that implement or are directly affected by this pattern.',
     )
-````
+```
 
 ## File: entity_types/graphiti/DataPipeline.py
-````python
+```python
 """Definition of the DataPipeline entity type for Graphiti."""
 
 from pydantic import BaseModel, Field
@@ -1947,10 +367,10 @@ class DataPipelineEntity(BaseModel):
         None,
         description='System components or modules involved in implementing this pipeline.',
     )
-````
+```
 
 ## File: entity_types/graphiti/IntegrationPattern.py
-````python
+```python
 """Definition of the IntegrationPattern entity type for Graphiti."""
 
 from pydantic import BaseModel, Field
@@ -2005,10 +425,10 @@ class IntegrationPatternEntity(BaseModel):
         None,
         description='The benefits or advantages this integration pattern provides.',
     )
-````
+```
 
 ## File: entity_types/graphiti/RetrievalMethod.py
-````python
+```python
 """Definition of the RetrievalMethod entity type for Graphiti."""
 
 from pydantic import BaseModel, Field
@@ -2063,10 +483,10 @@ class RetrievalMethodEntity(BaseModel):
         None,
         description='Specific scenarios or use cases where this retrieval method is particularly effective.',
     )
-````
+```
 
 ## File: entity_types/graphiti/TemporalModel.py
-````python
+```python
 """Definition of the TemporalModel entity type for Graphiti."""
 
 from pydantic import BaseModel, Field
@@ -2121,10 +541,10 @@ class TemporalModelEntity(BaseModel):
         None,
         description='Specific use cases or scenarios where this temporal model provides value.',
     )
-````
+```
 
 ## File: entity_types/__init__.py
-````python
+```python
 """Entity Types package.
 
 This package contains entity type definitions for Graphiti MCP Server.
@@ -2135,10 +555,10 @@ from entity_types.entity_registry import (
     get_entity_types,
     get_entity_type_subset,
 )
-````
+```
 
 ## File: entity_types/entity_registry.py
-````python
+```python
 """Entity Types Registry for Graphiti MCP Server.
 
 This module provides a registry to manage entity types in a modular way.
@@ -2182,10 +602,10 @@ def get_entity_type_subset(names: list[str]) -> Dict[str, Type[BaseModel]]:
         A dictionary containing only the specified entity types
     """
     return {name: _ENTITY_REGISTRY[name] for name in names if name in _ENTITY_REGISTRY}
-````
+```
 
 ## File: graphiti_cli/commands.py
-````python
+```python
 #!/usr/bin/env python3
 """
 Command implementations for the Graphiti CLI tool.
@@ -2199,6 +619,29 @@ import re  # For entity name validation
 
 from . import core
 from . import yaml_utils
+from constants import (
+    # Configuration constants
+    CONFIG_FILENAME, ENTITY_FILE_EXTENSION,
+    CONFIG_KEY_SERVICES, CONFIG_KEY_ID, CONFIG_KEY_CONTAINER_NAME, 
+    CONFIG_KEY_PORT_DEFAULT, CONFIG_KEY_GROUP_ID, CONFIG_KEY_ENTITY_DIR,
+    CONFIG_KEY_ENVIRONMENT,
+    # Default values
+    DEFAULT_CUSTOM_CONTAINER_NAME, DEFAULT_CUSTOM_PORT, DEFAULT_ENTITY_DIR_NAME,
+    # Environment variables
+    ENV_GRAPHITI_LOG_LEVEL,
+    # Logging
+    DEFAULT_LOG_LEVEL_STR,
+    # Entity template constants (these should remain local as they're specific to this module)
+    DIR_AI, DIR_GRAPH, DIR_ENTITIES, FILE_GIT_KEEP, REGEX_VALID_NAME
+)
+
+# --- Entity Template Constants ---
+ENTITY_CLASS_PATTERN = "class Product(BaseModel):"
+ENTITY_DESC_PATTERN_PRODUCT = "A Product represents"
+ENTITY_DESC_PATTERN_ABOUT_PRODUCTS = "about Products mentioned"
+ENTITY_DESC_PATTERN_PRODUCT_NAMES = "product names"
+ENTITY_DESC_PATTERN_PRODUCT_BELONGS = "the product belongs"
+ENTITY_DESC_PATTERN_PRODUCT_DESC = "description of the product"
 
 # --- Docker Commands ---
 
@@ -2281,14 +724,14 @@ def init_project(project_name: str, target_dir: Path):
         target_dir (Path): Target directory for the project
     """
     # Basic validation
-    if not re.fullmatch(r'^[a-zA-Z0-9_-]+$', project_name):
+    if not re.fullmatch(REGEX_VALID_NAME, project_name):
         print(f"{core.RED}Error: Invalid PROJECT_NAME '{project_name}'. Use only letters, numbers, underscores, and hyphens.{core.NC}")
         sys.exit(1)
 
     print(f"Initializing Graphiti project '{core.CYAN}{project_name}{core.NC}' in '{core.CYAN}{target_dir}{core.NC}'...")
 
     # Create ai/graph directory structure
-    graph_dir = target_dir / "ai" / "graph"
+    graph_dir = target_dir / DIR_AI / DIR_GRAPH
     try:
         graph_dir.mkdir(parents=True, exist_ok=True)
         print(f"Created directory structure: {core.CYAN}{graph_dir}{core.NC}")
@@ -2297,16 +740,16 @@ def init_project(project_name: str, target_dir: Path):
         sys.exit(1)
 
     # Create mcp-config.yaml in ai/graph directory
-    config_path = graph_dir / "mcp-config.yaml"
+    config_path = graph_dir / CONFIG_FILENAME
     config_content = f"""# Configuration for project: {project_name}
-services:
-  - id: {project_name}-main  # Service ID (used for default naming)
-    # container_name: "custom-name"  # Optional: Specify custom container name
-    # port_default: 8001             # Optional: Specify custom host port
-    group_id: "{project_name}"       # Graph group ID
-    entity_dir: "entities"           # Relative path to entity definitions within ai/graph
-    # environment:                   # Optional: Add non-secret env vars here
-    #   MY_FLAG: "true"
+{CONFIG_KEY_SERVICES}:
+  - {CONFIG_KEY_ID}: {project_name}-main  # Service ID (used for default naming)
+    # {CONFIG_KEY_CONTAINER_NAME}: "{DEFAULT_CUSTOM_CONTAINER_NAME}"  # Optional: Specify custom container name
+    # {CONFIG_KEY_PORT_DEFAULT}: {DEFAULT_CUSTOM_PORT}             # Optional: Specify custom host port
+    {CONFIG_KEY_GROUP_ID}: "{project_name}"       # Graph group ID
+    {CONFIG_KEY_ENTITY_DIR}: "{DEFAULT_ENTITY_DIR_NAME}"           # Relative path to entity definitions within ai/graph
+    {CONFIG_KEY_ENVIRONMENT}:                     # Optional: Add non-secret env vars here
+      {ENV_GRAPHITI_LOG_LEVEL}: "{DEFAULT_LOG_LEVEL_STR}"
 """
     try:
         config_path.write_text(config_content)
@@ -2316,10 +759,10 @@ services:
         sys.exit(1)
 
     # Create entities directory within ai/graph
-    entities_dir = graph_dir / "entities"
+    entities_dir = graph_dir / DIR_ENTITIES
     try:
         entities_dir.mkdir(exist_ok=True)
-        (entities_dir / ".gitkeep").touch(exist_ok=True)  # Create or update timestamp
+        (entities_dir / FILE_GIT_KEEP).touch(exist_ok=True)  # Create or update timestamp
         print(f"Created entities directory: {core.CYAN}{entities_dir}{core.NC}")
     except OSError as e:
         print(f"{core.RED}Error creating entities directory {entities_dir}: {e}{core.NC}")
@@ -2465,13 +908,13 @@ def create_entity_set(entity_name: str, target_dir: Path):
         target_dir (Path): Target project root directory
     """
     # Validate entity_name format
-    if not re.fullmatch(r'^[a-zA-Z0-9_-]+$', entity_name):
+    if not re.fullmatch(REGEX_VALID_NAME, entity_name):
         print(f"{core.RED}Error: Invalid entity name '{entity_name}'. Use only letters, numbers, underscores, and hyphens.{core.NC}")
         sys.exit(1)
         
     # Load project configuration from ai/graph directory
-    graph_dir = target_dir / "ai" / "graph"
-    config_path = graph_dir / "mcp-config.yaml"
+    graph_dir = target_dir / DIR_AI / DIR_GRAPH
+    config_path = graph_dir / CONFIG_FILENAME
     if not config_path.is_file():
         print(f"{core.RED}Error: Project configuration file not found: {config_path}{core.NC}")
         print(f"Make sure the project has been initialized with 'graphiti init' first.")
@@ -2483,23 +926,23 @@ def create_entity_set(entity_name: str, target_dir: Path):
         sys.exit(1)
         
     # Validate project config structure
-    if 'services' not in project_config or not isinstance(project_config['services'], list) or not project_config['services']:
-        print(f"{core.RED}Error: Invalid or missing 'services' section in project configuration: {config_path}{core.NC}")
+    if CONFIG_KEY_SERVICES not in project_config or not isinstance(project_config[CONFIG_KEY_SERVICES], list) or not project_config[CONFIG_KEY_SERVICES]:
+        print(f"{core.RED}Error: Invalid or missing '{CONFIG_KEY_SERVICES}' section in project configuration: {config_path}{core.NC}")
         sys.exit(1)
         
     # Extract the entity directory name from the first service entry
-    entity_dir_name = project_config.get('services', [{}])[0].get('entity_dir', 'entities')
+    entity_dir_name = project_config.get(CONFIG_KEY_SERVICES, [{}])[0].get(CONFIG_KEY_ENTITY_DIR, DEFAULT_ENTITY_DIR_NAME)
     
     # Calculate paths - entities directory directly in graph_dir
     project_entity_dir = graph_dir / entity_dir_name
     
     # Generate file name with the entity class name (without Entity suffix)
     class_name = _to_pascal_case(entity_name)
-    entity_file_path = project_entity_dir / f"{class_name}.py"  # Name file after class
+    entity_file_path = project_entity_dir / f"{class_name}{ENTITY_FILE_EXTENSION}"  # Name file after class
     
     # Check if the entity file already exists
     if entity_file_path.exists():
-        print(f"{core.RED}Error: Entity file '{class_name}.py' already exists at: {entity_file_path}{core.NC}")
+        print(f"{core.RED}Error: Entity file '{class_name}{ENTITY_FILE_EXTENSION}' already exists at: {entity_file_path}{core.NC}")
         sys.exit(1)
         
     # Get path to template file from mcp_server
@@ -2527,13 +970,13 @@ class {class_name}(BaseModel):
         else:
             template_content = example_template_path.read_text()
             # Perform replacements carefully
-            content = template_content.replace("class Product(BaseModel):", f"class {class_name}(BaseModel):")
+            content = template_content.replace(ENTITY_CLASS_PATTERN, f"class {class_name}(BaseModel):")
             # Replace descriptions, trying to be specific
-            content = content.replace("A Product represents", f"A {class_name} represents")
-            content = content.replace("about Products mentioned", f"about {class_name} entities mentioned")
-            content = content.replace("product names", f"{entity_name} names")
-            content = content.replace("the product belongs", f"the {entity_name} belongs")
-            content = content.replace("description of the product", f"description of the {entity_name}")
+            content = content.replace(ENTITY_DESC_PATTERN_PRODUCT, f"A {class_name} represents")
+            content = content.replace(ENTITY_DESC_PATTERN_ABOUT_PRODUCTS, f"about {class_name} entities mentioned")
+            content = content.replace(ENTITY_DESC_PATTERN_PRODUCT_NAMES, f"{entity_name} names")
+            content = content.replace(ENTITY_DESC_PATTERN_PRODUCT_BELONGS, f"the {entity_name} belongs")
+            content = content.replace(ENTITY_DESC_PATTERN_PRODUCT_DESC, f"description of the {entity_name}")
             # Add more replacements if needed based on the template content
 
             entity_file_path.write_text(content)
@@ -2548,10 +991,10 @@ class {class_name}(BaseModel):
     except Exception as e:
         print(f"{core.RED}An unexpected error occurred creating entity '{entity_name}': {e}{core.NC}")
         sys.exit(1)
-````
+```
 
 ## File: graphiti_cli/core.py
-````python
+```python
 #!/usr/bin/env python3
 """
 Core utility functions for the Graphiti CLI tool.
@@ -2565,21 +1008,23 @@ from enum import Enum
 import shutil
 from typing import List, Optional, Union, Dict, Any
 
-# --- ANSI Color Constants ---
-# These match the original bash script for consistency
-RED = '\033[0;31m'
-GREEN = '\033[0;32m'
-YELLOW = '\033[0;33m'
-BLUE = '\033[0;34m'
-CYAN = '\033[0;36m'
-BOLD = '\033[1m'
-NC = '\033[0m'  # No Color
-
-# --- Constants ---
-DEFAULT_PORT_START = 8000
-DEFAULT_MCP_CONTAINER_PORT_VAR = "MCP_PORT"
-CONTAINER_ENTITY_PATH = "/app/entity_types"
-ENV_REPO_PATH = "MCP_GRAPHITI_REPO_PATH"
+# Import shared constants from central constants module
+from constants import (
+    # ANSI colors
+    RED, GREEN, YELLOW, BLUE, CYAN, BOLD, NC,
+    # Directory structure
+    DIR_MCP_SERVER, DIR_ENTITY_TYPES, DIR_AI, DIR_GRAPH, DIR_ENTITIES, DIR_DIST,
+    # Files
+    FILE_PYPROJECT_TOML, FILE_GIT_KEEP,
+    # Validation
+    REGEX_VALID_NAME,
+    # Docker/container defaults
+    DEFAULT_PORT_START, DEFAULT_MCP_CONTAINER_PORT_VAR, CONTAINER_ENTITY_PATH,
+    # Environment variables
+    ENV_REPO_PATH,
+    # Package constants
+    PACKAGE_LOCAL_WHEEL_MARKER, PACKAGE_PUBLISHED_PREFIX
+)
 
 # --- Enums ---
 class LogLevel(str, Enum):
@@ -2649,8 +1094,8 @@ def _validate_repo_path(path: Path) -> bool:
         return False
     
     # Check for essential directories
-    mcp_server_dir = path / "mcp_server"
-    entity_types_dir = mcp_server_dir / "entity_types"
+    mcp_server_dir = path / DIR_MCP_SERVER
+    entity_types_dir = mcp_server_dir / DIR_ENTITY_TYPES
     
     return mcp_server_dir.is_dir() and entity_types_dir.is_dir()
 
@@ -2802,15 +1247,15 @@ def ensure_dist_for_build() -> None:
     print(f"{BOLD}Checking build configuration...{NC}")
     
     # Check pyproject.toml to see if we're using local wheel
-    pyproject_path = mcp_server_dir / "pyproject.toml"
+    pyproject_path = mcp_server_dir / FILE_PYPROJECT_TOML
     try:
         with open(pyproject_path, 'r') as f:
             pyproject_content = f.read()
             
         # Check if we're using local wheel and not published package
-        using_local_wheel = "graphiti-core @ file:///dist/" in pyproject_content
+        using_local_wheel = PACKAGE_LOCAL_WHEEL_MARKER in pyproject_content
         using_published = any(
-            line.strip().startswith("graphiti-core>=") 
+            line.strip().startswith(PACKAGE_PUBLISHED_PREFIX) 
             for line in pyproject_content.splitlines()
             if not line.strip().startswith('#')
         )
@@ -2822,8 +1267,8 @@ def ensure_dist_for_build() -> None:
         print(f"{CYAN}Local graphiti-core wheel configuration detected.{NC}")
         
         # Source and target paths
-        repo_dist = repo_root / "dist"
-        server_dist = mcp_server_dir / "dist"
+        repo_dist = repo_root / DIR_DIST
+        server_dist = mcp_server_dir / DIR_DIST
         
         # Check if source dist exists
         if not repo_dist.is_dir():
@@ -2852,10 +1297,10 @@ def ensure_dist_for_build() -> None:
         print(f"{RED}Error checking build configuration: {e}{NC}")
         print(f"{YELLOW}Please ensure your pyproject.toml is properly configured.{NC}")
         sys.exit(1)
-````
+```
 
 ## File: graphiti_cli/main.py
-````python
+```python
 #!/usr/bin/env python3
 """
 Main entry point for the Graphiti CLI tool.
@@ -2869,11 +1314,58 @@ from typing_extensions import Annotated  # Preferred for Typer >= 0.9
 from . import commands
 from .core import LogLevel, get_repo_root
 
+# --- Application Constants ---
+APP_DESCRIPTION = "CLI for managing Graphiti MCP Server projects and Docker environment."
+APP_MARKUP_MODE = "markdown"  # Nicer help text formatting
+
+# --- Default Values ---
+DEFAULT_DIR = Path(".")
+
+# --- CLI Option Constants ---
+OPT_DETACHED_LONG = "--detached"
+OPT_DETACHED_SHORT = "-d"
+OPT_LOG_LEVEL = "--log-level"
+
+# --- Command Emojis ---
+EMOJI_INIT = "✨"
+EMOJI_ENTITY = "📄"
+EMOJI_RULES = "🔗"
+EMOJI_UP = "🚀"
+EMOJI_DOWN = "🛑"
+EMOJI_RESTART = "🔄"
+EMOJI_RELOAD = "⚡"
+EMOJI_COMPOSE = "⚙️"
+
+# --- Help Text Constants ---
+# App-level help
+HELP_DETACHED = "Run containers in detached mode."
+HELP_DETACHED_UP = "Run 'up' in detached mode after 'down'."
+HELP_LOG_LEVEL = "Set logging level for containers."
+HELP_LOG_LEVEL_COMPOSE = "Set logging level for Docker Compose execution."
+
+# Command help texts
+HELP_CMD_INIT = f"Initialize a project: create ai/graph structure with config, entities dir, and rules. {EMOJI_INIT}"
+HELP_CMD_ENTITY = f"Create a new entity type set directory and template file within a project's ai/graph/entities directory. {EMOJI_ENTITY}"
+HELP_CMD_RULES = f"Setup/update Cursor rules symlinks and schema template for a project. {EMOJI_RULES}"
+HELP_CMD_UP = f"Start all containers using Docker Compose (builds first). {EMOJI_UP}"
+HELP_CMD_DOWN = f"Stop and remove all containers using Docker Compose. {EMOJI_DOWN}"
+HELP_CMD_RESTART = f"Restart all containers: runs 'down' then 'up'. {EMOJI_RESTART}"
+HELP_CMD_RELOAD = f"Restart a specific running service container. {EMOJI_RELOAD}"
+HELP_CMD_COMPOSE = f"Generate docker-compose.yml from base and project configs. {EMOJI_COMPOSE}"
+
+# Argument help texts
+HELP_ARG_PROJECT_NAME = "Name of the target project."
+HELP_ARG_TARGET_DIR = "Target project root directory."
+HELP_ARG_ENTITY_NAME = "Name for the new entity type set (e.g., 'my-entities')."
+HELP_ARG_TARGET_DIR_CONFIG = "Target project root directory containing ai/graph/mcp-config.yaml."
+HELP_ARG_PROJECT_NAME_RULES = "Name of the target project for rule setup."
+HELP_ARG_SERVICE_NAME = "Name of the service to reload (e.g., 'mcp-test-project-1-main')."
+
 # Initialize Typer app
 app = typer.Typer(
-    help="CLI for managing Graphiti MCP Server projects and Docker environment.",
+    help=APP_DESCRIPTION,
     no_args_is_help=True,  # Show help if no command is given
-    rich_markup_mode="markdown"  # Nicer help text formatting
+    rich_markup_mode=APP_MARKUP_MODE
 )
 
 # --- Callback to ensure repo path is found early ---
@@ -2892,15 +1384,15 @@ def main_callback(ctx: typer.Context):
 
 @app.command()
 def init(
-    project_name: Annotated[str, typer.Argument(help="Name of the target project.")],
+    project_name: Annotated[str, typer.Argument(help=HELP_ARG_PROJECT_NAME)],
     target_dir: Annotated[Path, typer.Argument(
-        help="Target project root directory.",
+        help=HELP_ARG_TARGET_DIR,
         exists=False,  # Allow creating the directory
         file_okay=False,
         dir_okay=True,
         writable=True,
         resolve_path=True  # Convert to absolute path
-    )] = Path(".")
+    )] = DEFAULT_DIR
 ):
     """
     Initialize a project: create ai/graph structure with config, entities dir, and rules. ✨
@@ -2909,14 +1401,14 @@ def init(
 
 @app.command()
 def entity(
-    set_name: Annotated[str, typer.Argument(help="Name for the new entity type set (e.g., 'my-entities').")],
+    set_name: Annotated[str, typer.Argument(help=HELP_ARG_ENTITY_NAME)],
     target_dir: Annotated[Path, typer.Argument(
-        help="Target project root directory containing ai/graph/mcp-config.yaml.",
+        help=HELP_ARG_TARGET_DIR_CONFIG,
         exists=True,  # Must exist for entity creation
         file_okay=False,
         dir_okay=True,
         resolve_path=True
-    )] = Path(".")
+    )] = DEFAULT_DIR
 ):
     """
     Create a new entity type set directory and template file within a project's ai/graph/entities directory. 📄
@@ -2925,14 +1417,14 @@ def entity(
 
 @app.command()
 def rules(
-    project_name: Annotated[str, typer.Argument(help="Name of the target project for rule setup.")],
+    project_name: Annotated[str, typer.Argument(help=HELP_ARG_PROJECT_NAME_RULES)],
     target_dir: Annotated[Path, typer.Argument(
-        help="Target project root directory.",
+        help=HELP_ARG_TARGET_DIR,
         exists=True,  # Must exist for rules setup
         file_okay=False,
         dir_okay=True,
         resolve_path=True
-    )] = Path(".")
+    )] = DEFAULT_DIR
 ):
     """
     Setup/update Cursor rules symlinks and schema template for a project. 🔗
@@ -2941,8 +1433,8 @@ def rules(
 
 @app.command()
 def up(
-    detached: Annotated[bool, typer.Option("--detached", "-d", help="Run containers in detached mode.")] = False,
-    log_level: Annotated[LogLevel, typer.Option("--log-level", help="Set logging level for containers.", case_sensitive=False)] = LogLevel.info
+    detached: Annotated[bool, typer.Option(OPT_DETACHED_LONG, OPT_DETACHED_SHORT, help=HELP_DETACHED)] = False,
+    log_level: Annotated[LogLevel, typer.Option(OPT_LOG_LEVEL, help=HELP_LOG_LEVEL, case_sensitive=False)] = LogLevel.info
 ):
     """
     Start all containers using Docker Compose (builds first). 🚀
@@ -2951,7 +1443,7 @@ def up(
 
 @app.command()
 def down(
-    log_level: Annotated[LogLevel, typer.Option("--log-level", help="Set logging level for Docker Compose execution.", case_sensitive=False)] = LogLevel.info
+    log_level: Annotated[LogLevel, typer.Option(OPT_LOG_LEVEL, help=HELP_LOG_LEVEL_COMPOSE, case_sensitive=False)] = LogLevel.info
 ):
     """
     Stop and remove all containers using Docker Compose. 🛑
@@ -2960,8 +1452,8 @@ def down(
 
 @app.command()
 def restart(
-    detached: Annotated[bool, typer.Option("--detached", "-d", help="Run 'up' in detached mode after 'down'.")] = False,
-    log_level: Annotated[LogLevel, typer.Option("--log-level", help="Set logging level for containers.", case_sensitive=False)] = LogLevel.info
+    detached: Annotated[bool, typer.Option(OPT_DETACHED_LONG, OPT_DETACHED_SHORT, help=HELP_DETACHED_UP)] = False,
+    log_level: Annotated[LogLevel, typer.Option(OPT_LOG_LEVEL, help=HELP_LOG_LEVEL, case_sensitive=False)] = LogLevel.info
 ):
     """
     Restart all containers: runs 'down' then 'up'. 🔄
@@ -2970,7 +1462,7 @@ def restart(
 
 @app.command()
 def reload(
-    service_name: Annotated[str, typer.Argument(help="Name of the service to reload (e.g., 'mcp-test-project-1-main').")]
+    service_name: Annotated[str, typer.Argument(help=HELP_ARG_SERVICE_NAME)]
 ):
     """
     Restart a specific running service container. ⚡
@@ -2988,10 +1480,10 @@ def compose():
 # Allow running the script directly for development/testing
 if __name__ == "__main__":
     app()
-````
+```
 
 ## File: graphiti_cli/yaml_utils.py
-````python
+```python
 #!/usr/bin/env python3
 """
 YAML utility functions for the Graphiti CLI.
@@ -3005,49 +1497,52 @@ from ruamel.yaml.comments import CommentedMap
 import os
 from typing import Optional, List, Dict, Any
 
-from .core import get_mcp_server_dir, CONTAINER_ENTITY_PATH, DEFAULT_PORT_START, DEFAULT_MCP_CONTAINER_PORT_VAR, RED, GREEN, YELLOW, CYAN, NC
+from .core import get_mcp_server_dir
+from constants import (
+    # Colors for output
+    RED, GREEN, YELLOW, CYAN, NC,
+    # Docker/container constants
+    CONTAINER_ENTITY_PATH, DEFAULT_PORT_START, DEFAULT_MCP_CONTAINER_PORT_VAR,
+    # Directory structure
+    DIR_AI, DIR_GRAPH, DIR_ENTITIES, 
+    # Environment variables
+    ENV_MCP_GROUP_ID, ENV_MCP_USE_CUSTOM_ENTITIES, ENV_MCP_USE_CUSTOM_ENTITIES_VALUE, ENV_MCP_ENTITY_TYPE_DIR,
+    # File and path constants
+    BASE_COMPOSE_FILENAME, PROJECTS_REGISTRY_FILENAME, DOCKER_COMPOSE_OUTPUT_FILENAME,
+    # Project container path
+    PROJECT_CONTAINER_ENTITY_PATH,
+    # Registry file keys
+    REGISTRY_PROJECTS_KEY, REGISTRY_ROOT_DIR_KEY, REGISTRY_CONFIG_FILE_KEY, REGISTRY_ENABLED_KEY,
+    # Compose file keys
+    COMPOSE_SERVICES_KEY, COMPOSE_CUSTOM_BASE_ANCHOR_KEY, COMPOSE_CONTAINER_NAME_KEY,
+    COMPOSE_PORTS_KEY, COMPOSE_ENVIRONMENT_KEY, COMPOSE_VOLUMES_KEY,
+    # Project config keys
+    PROJECT_SERVICES_KEY, PROJECT_SERVER_ID_KEY, PROJECT_ENTITY_DIR_KEY, 
+    PROJECT_CONTAINER_NAME_KEY, PROJECT_PORT_DEFAULT_KEY, PROJECT_GROUP_ID_KEY, PROJECT_ENVIRONMENT_KEY,
+    # Service name constants
+    SERVICE_NAME_PREFIX
+)
 from .core import LogLevel
 
-# Define the distinct path for project-specific entities inside the container
-PROJECT_CONTAINER_ENTITY_PATH = "/app/project_entities"
+# --- Project AI Graph Dirs ---
+PROJECT_AI_GRAPH_DIRS = [DIR_AI, DIR_GRAPH]  # Standard subdirectory path for project entities
 
-# --- File and Path Constants ---
-BASE_COMPOSE_FILENAME = "base-compose.yaml"
-PROJECTS_REGISTRY_FILENAME = "mcp-projects.yaml"
-DOCKER_COMPOSE_OUTPUT_FILENAME = "docker-compose.yml"
+# --- Registry File Header Constants ---
+REGISTRY_HEADER_LINES = [
+    "# !! WARNING: This file is managed by the 'graphiti init' command. !!",
+    "# !! Avoid manual edits unless absolutely necessary.                 !!",
+    "#",
+    "# Maps project names to their configuration details.",
+    "# Paths should be absolute for reliability.",
+]
 
-# --- YAML Key Constants ---
-# Registry file keys
-REGISTRY_PROJECTS_KEY = "projects"
-REGISTRY_ROOT_DIR_KEY = "root_dir"
-REGISTRY_CONFIG_FILE_KEY = "config_file"
-REGISTRY_ENABLED_KEY = "enabled"
-
-# Compose file keys
-COMPOSE_SERVICES_KEY = "services"
-COMPOSE_CUSTOM_BASE_ANCHOR_KEY = "x-graphiti-mcp-custom-base"
-COMPOSE_CONTAINER_NAME_KEY = "container_name"
-COMPOSE_PORTS_KEY = "ports"
-COMPOSE_ENVIRONMENT_KEY = "environment"
-COMPOSE_VOLUMES_KEY = "volumes"
-
-# Project config keys
-PROJECT_SERVICES_KEY = "services"
-PROJECT_SERVER_ID_KEY = "id"
-PROJECT_ENTITY_DIR_KEY = "entity_dir"
-PROJECT_CONTAINER_NAME_KEY = "container_name"
-PROJECT_PORT_DEFAULT_KEY = "port_default"
-PROJECT_GROUP_ID_KEY = "group_id"
-PROJECT_ENVIRONMENT_KEY = "environment"
-
-# --- Environment Variable Constants ---
-ENV_MCP_GROUP_ID = "MCP_GROUP_ID"
-ENV_MCP_USE_CUSTOM_ENTITIES = "MCP_USE_CUSTOM_ENTITIES"
-ENV_MCP_USE_CUSTOM_ENTITIES_VALUE = "true"
-ENV_MCP_ENTITY_TYPE_DIR = "MCP_ENTITY_TYPE_DIR"
-
-# --- Other Constants ---
-SERVICE_NAME_PREFIX = "mcp-"
+# --- Docker Compose Header Constants ---
+DOCKER_COMPOSE_HEADER_LINES = [
+    "# Generated by graphiti CLI",
+    "# Do not edit this file directly. Modify base-compose.yaml or project-specific mcp-config.yaml files instead.",
+    "",
+    "# --- Custom MCP Services Info ---"
+]
 
 # --- YAML Instances ---
 yaml_rt = YAML()  # Round-Trip for preserving structure/comments
@@ -3140,16 +1635,9 @@ def update_registry_logic(
     # Create registry file with header if it doesn't exist
     if not registry_file.exists():
         print(f"Creating new registry file: {registry_file}")
-        header = [
-            "# !! WARNING: This file is managed by the 'graphiti init' command. !!",
-            "# !! Avoid manual edits unless absolutely necessary.                 !!",
-            "#",
-            "# Maps project names to their configuration details.",
-            "# Paths should be absolute for reliability.",
-        ]
         initial_data = CommentedMap({REGISTRY_PROJECTS_KEY: CommentedMap()})
         try:
-            write_yaml_file(initial_data, registry_file, header=header)
+            write_yaml_file(initial_data, registry_file, header=REGISTRY_HEADER_LINES)
         except Exception:
             return False  # Error handled in write_yaml_file
 
@@ -3293,7 +1781,7 @@ def generate_compose_logic(
             env_vars[ENV_MCP_USE_CUSTOM_ENTITIES] = ENV_MCP_USE_CUSTOM_ENTITIES_VALUE  # Assume true if defined here
 
             # Calculate absolute host path for entity volume mount
-            abs_host_entity_path = (project_root_dir / entity_type_dir).resolve()
+            abs_host_entity_path = (project_root_dir / DIR_AI / DIR_GRAPH / entity_type_dir).resolve()
             if not abs_host_entity_path.is_dir():
                 print(f"Warning: Entity directory '{abs_host_entity_path}' for service '{service_name}' does not exist. Volume mount might fail.")
                 # Continue anyway, Docker will create an empty dir inside container if host path doesn't exist
@@ -3327,11 +1815,7 @@ def generate_compose_logic(
             overall_service_index += 1
 
     # --- Write Output File ---
-    header = [
-        "# Generated by graphiti CLI",
-        "# Do not edit this file directly. Modify base-compose.yaml or project-specific mcp-config.yaml files instead.",
-        "",
-        "# --- Custom MCP Services Info ---",
+    header = DOCKER_COMPOSE_HEADER_LINES + [
         f"# Default Ports: Assigned sequentially starting from {DEFAULT_PORT_START + 1}",
         "#              Can be overridden by specifying 'port_default' in project's mcp-config.yaml.",
     ]
@@ -3341,408 +1825,10 @@ def generate_compose_logic(
     except Exception:
         # Error already printed by write_yaml_file
         sys.exit(1)
-````
-
-## File: mcp_server.egg-info/dependency_links.txt
-````
-
-````
-
-## File: mcp_server.egg-info/entry_points.txt
-````
-[console_scripts]
-graphiti = graphiti_cli.main:app
-````
-
-## File: mcp_server.egg-info/PKG-INFO
-````
-Metadata-Version: 2.4
-Name: mcp-server
-Version: 0.1.0
-Summary: Graphiti MCP Server
-Requires-Python: >=3.10
-Description-Content-Type: text/markdown
-Requires-Dist: mcp>=1.5.0
-Requires-Dist: openai>=1.68.2
-Requires-Dist: graphiti-core>=0.8.5
-Requires-Dist: ruamel.yaml>=0.17.21
-Requires-Dist: typer[all]>=0.9.0
-Requires-Dist: python-dotenv>=1.0.0
-
-# Graphiti MCP Server
-
-Graphiti is a framework for building and querying temporally-aware knowledge graphs, specifically tailored for AI agents operating in dynamic environments. Unlike traditional retrieval-augmented generation (RAG) methods, Graphiti continuously integrates user interactions, structured and unstructured enterprise data, and external information into a coherent, queryable graph. The framework supports incremental data updates, efficient retrieval, and precise historical queries without requiring complete graph recomputation, making it suitable for developing interactive, context-aware AI applications.
-
-This is an experimental Model Context Protocol (MCP) server implementation for Graphiti. The MCP server exposes Graphiti's key functionality through the MCP protocol, allowing AI assistants to interact with Graphiti's knowledge graph capabilities.
-
-## Features
-
-The Graphiti MCP server exposes the following key high-level functions of Graphiti:
-
-- **Episode Management**: Add, retrieve, and delete episodes (text, messages, or JSON data)
-- **Entity Management**: Search and manage entity nodes and relationships in the knowledge graph
-- **Search Capabilities**: Search for facts (edges) and node summaries using semantic and hybrid search
-- **Group Management**: Organize and manage groups of related data with group_id filtering
-- **Graph Maintenance**: Clear the graph and rebuild indices
-
-## Installation
-
-### Prerequisites
-
-1. Ensure you have Python 3.10 or higher installed.
-2. A running Neo4j database (version 5.26 or later required)
-3. OpenAI API key for LLM operations
-
-### Setup
-
-1. Clone the repository and navigate to the mcp_server directory
-2. Use `uv` to create a virtual environment and install dependencies:
-
-```bash
-# Install uv if you don't have it already
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Create a virtual environment and install dependencies in one step
-uv sync
 ```
-
-## Configuration
-
-The server uses the following environment variables:
-
-- `NEO4J_URI`: URI for the Neo4j database (default: `bolt://localhost:7687`)
-- `NEO4J_USER`: Neo4j username (default: `neo4j`)
-- `NEO4J_PASSWORD`: Neo4j password (default: `demodemo`)
-- `OPENAI_API_KEY`: OpenAI API key (required for LLM operations)
-- `OPENAI_BASE_URL`: Optional base URL for OpenAI API
-- `MODEL_NAME`: Optional model name to use for LLM inference
-
-You can set these variables in a `.env` file in the project directory.
-
-## Running the Server
-
-To run the Graphiti MCP server directly using `uv`:
-
-```bash
-uv run graphiti_mcp_server.py
-```
-
-With options:
-
-```bash
-uv run graphiti_mcp_server.py --model gpt-4o --transport sse
-```
-
-Available arguments:
-
-- `--model`: Specify the model name to use with the LLM client
-- `--transport`: Choose the transport method (sse or stdio, default: sse)
-- `--group-id`: Set a namespace for the graph (optional)
-- `--destroy-graph`: Destroy all Graphiti graphs (use with caution)
-- `--use-custom-entities`: Enable entity extraction using the predefined ENTITY_TYPES
-
-## Docker Deployment
-
-The Graphiti MCP server can be deployed using Docker. The Dockerfile uses `uv` for package management, ensuring consistent dependency installation.
-
-### Environment Configuration
-
-Before running the Docker Compose setup, you need to configure the environment variables. You have two options:
-
-1. **Using a .env file** (recommended):
-
-   - Copy the provided `.env.example` file to create a `.env` file:
-     ```bash
-     cp .env.example .env
-     ```
-   - Edit the `.env` file to set your OpenAI API key and other configuration options:
-     ```
-     # Required for LLM operations
-     OPENAI_API_KEY=your_openai_api_key_here
-     MODEL_NAME=gpt-4o
-     # Optional: OPENAI_BASE_URL only needed for non-standard OpenAI endpoints
-     # OPENAI_BASE_URL=https://api.openai.com/v1
-     ```
-   - The Docker Compose setup is configured to use this file if it exists (it's optional)
-
-2. **Using environment variables directly**:
-   - You can also set the environment variables when running the Docker Compose command:
-     ```bash
-     OPENAI_API_KEY=your_key MODEL_NAME=gpt-4o docker compose up
-     ```
-
-### Neo4j Configuration
-
-The Docker Compose setup includes a Neo4j container with the following default configuration:
-
-- Username: `neo4j`
-- Password: `demodemo`
-- URI: `bolt://neo4j:7687` (from within the Docker network)
-- Memory settings optimized for development use
-
-## Project-Based Architecture
-
-The Graphiti MCP server uses a centralized, project-based architecture that allows different projects to define their own custom MCP servers while sharing a single Neo4j instance and core server.
-
-### Project Configuration
-
-Each project defines its custom MCP server configuration in an `mcp-config.yaml` file:
-
-```yaml
-# Configuration for project: project-name
-services:
-  - id: project-main         # Service ID (used for default naming)
-    # container_name: "custom-name" # Optional: Specify custom container name
-    # port_default: 8001           # Optional: Specify custom host port
-    group_id: "project-name"     # Graph group ID
-    entity_dir: "entities"       # Relative path to entity definitions within project
-    # environment:                 # Optional: Add non-secret env vars here
-    #   MY_FLAG: "true"
-```
-
-### Central Registry
-
-All projects are registered in a central `mcp-projects.yaml` file in the `mcp-server` repository:
-
-```yaml
-# Maps project names to their configuration details
-projects:
-  project-name:
-    config_file: /absolute/path/to/project-name/mcp-config.yaml
-    root_dir: /absolute/path/to/project-name
-    enabled: true
-```
-
-### Docker Compose Generation
-
-The system automatically generates a `docker-compose.yml` file based on:
-- A base configuration (`base-compose.yaml`)
-- All enabled projects in the central registry
-
-This allows multiple projects to share a single Neo4j instance and core MCP server while maintaining isolation between different projects' entity types and data.
-
-### Project Setup
-
-To set up a new project:
-
-```bash
-cd /path/to/your/project
-/path/to/mcp-server/scripts/graphiti init project-name .
-```
-
-This will:
-1. Create a template `mcp-config.yaml` in your project directory
-2. Create an `entities/` directory for your custom entity definitions
-3. Register your project in the central `mcp-projects.yaml` with absolute paths
-4. Set up cursor rules in your project
-
-### Running Services
-
-All services are managed centrally from the `mcp-server` directory:
-
-```bash
-cd /path/to/mcp-server
-./scripts/graphiti compose   # Generate the docker-compose.yml
-./scripts/graphiti up -d     # Start all services
-./scripts/graphiti down      # Stop all services
-./scripts/graphiti restart   # Restart all services
-```
-
-### Running Services
-
-To run the Graphiti MCP server with Docker Compose:
-
-```bash
-docker compose up
-```
-
-Or if you're using an older version of Docker Compose:
-
-```bash
-docker-compose up
-```
-
-This will start both the Neo4j database and the Graphiti MCP server. The Docker setup:
-
-- Uses `uv` for package management and running the server
-- Installs dependencies from the `pyproject.toml` file
-- Connects to the Neo4j container using the environment variables
-- Exposes the server on port 8000 for HTTP-based SSE transport
-- Includes a healthcheck for Neo4j to ensure it's fully operational before starting the MCP server
-
-## Integrating with MCP Clients
-
-### Configuration
-
-To use the Graphiti MCP server with an MCP-compatible client, configure it to connect to the server:
-
-```json
-{
-  "mcpServers": {
-    "graphiti": {
-      "transport": "stdio",
-      "command": "uv",
-      "args": [
-        "run",
-        "/ABSOLUTE/PATH/TO/graphiti_mcp_server.py",
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "NEO4J_URI": "bolt://localhost:7687",
-        "NEO4J_USER": "neo4j",
-        "NEO4J_PASSWORD": "demodemo",
-        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-        "MODEL_NAME": "gpt-4o"
-      }
-    }
-  }
-}
-```
-
-For SSE transport (HTTP-based), you can use this configuration:
-
-```json
-{
-  "mcpServers": {
-    "graphiti": {
-      "transport": "sse",
-      "url": "http://localhost:8000/sse"
-    }
-  }
-}
-```
-
-Or start the server with uv and connect to it:
-
-```json
-{
-  "mcpServers": {
-    "graphiti": {
-      "command": "uv",
-      "args": [
-        "run",
-        "/ABSOLUTE/PATH/TO/graphiti_mcp_server.py",
-        "--transport",
-        "sse"
-      ],
-      "env": {
-        "NEO4J_URI": "bolt://localhost:7687",
-        "NEO4J_USER": "neo4j",
-        "NEO4J_PASSWORD": "demodemo",
-        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-        "MODEL_NAME": "gpt-4o"
-      }
-    }
-  }
-}
-```
-
-## Available Tools
-
-The Graphiti MCP server exposes the following tools:
-
-- `add_episode`: Add an episode to the knowledge graph (supports text, JSON, and message formats)
-- `search_nodes`: Search the knowledge graph for relevant node summaries
-- `search_facts`: Search the knowledge graph for relevant facts (edges between entities)
-- `delete_entity_edge`: Delete an entity edge from the knowledge graph
-- `delete_episode`: Delete an episode from the knowledge graph
-- `get_entity_edge`: Get an entity edge by its UUID
-- `get_episodes`: Get the most recent episodes for a specific group
-- `clear_graph`: Clear all data from the knowledge graph and rebuild indices
-- `get_status`: Get the status of the Graphiti MCP server and Neo4j connection
-
-For detailed usage instructions, known issues, and best practices, see the [MCP Tools Usage Guide](./docs/MCP_TOOLS_USAGE.md).
-
-## Working with JSON Data
-
-The Graphiti MCP server can process structured JSON data through the `add_episode` tool with `source="json"`. This allows you to automatically extract entities and relationships from structured data:
-
-```
-add_episode(
-    name="Customer Profile",
-    episode_body="{\"company\": {\"name\": \"Acme Technologies\"}, \"products\": [{\"id\": \"P001\", \"name\": \"CloudSync\"}, {\"id\": \"P002\", \"name\": \"DataMiner\"}]}",
-    source="json",
-    source_description="CRM data"
-)
-```
-
-## Integrating with the Cursor IDE
-
-To integrate the Graphiti MCP Server with the Cursor IDE, follow these steps:
-
-1. Run the Graphiti MCP server using the SSE transport:
-
-```bash
-python graphiti_mcp_server.py --transport sse --use-custom-entities --group-id <your_group_id>
-```
-
-Hint: specify a `group_id` to retain prior graph data. If you do not specify a `group_id`, the server will create a new graph
-
-2. Configure Cursor to connect to the Graphiti MCP server.
-
-```json
-{
-  "mcpServers": {
-    "Graphiti": {
-      "url": "http://localhost:8000/sse"
-    }
-  }
-}
-```
-
-3. Add the Graphiti rules to Cursor's User Rules. See [cursor_rules.md](cursor_rules.md) for details.
-
-4. Kick off an agent session in Cursor.
-
-The integration enables AI assistants in Cursor to maintain persistent memory through Graphiti's knowledge graph capabilities.
-
-## Requirements
-
-- Python 3.10 or higher
-- Neo4j database (version 5.26 or later required)
-- OpenAI API key (for LLM operations and embeddings)
-- MCP-compatible client
-
-## License
-
-This project is licensed under the same license as the Graphiti project.
-````
-
-## File: mcp_server.egg-info/requires.txt
-````
-mcp>=1.5.0
-openai>=1.68.2
-graphiti-core>=0.8.5
-ruamel.yaml>=0.17.21
-typer[all]>=0.9.0
-python-dotenv>=1.0.0
-````
-
-## File: mcp_server.egg-info/SOURCES.txt
-````
-README.md
-pyproject.toml
-graphiti_cli/__init__.py
-graphiti_cli/commands.py
-graphiti_cli/core.py
-graphiti_cli/main.py
-graphiti_cli/yaml_utils.py
-mcp_server.egg-info/PKG-INFO
-mcp_server.egg-info/SOURCES.txt
-mcp_server.egg-info/dependency_links.txt
-mcp_server.egg-info/entry_points.txt
-mcp_server.egg-info/requires.txt
-mcp_server.egg-info/top_level.txt
-````
-
-## File: mcp_server.egg-info/top_level.txt
-````
-graphiti_cli
-````
 
 ## File: rules/examples/graphiti-example-schema.md
-````markdown
+```markdown
 ---
 description: Use this rule when working specifically within the 'example' project context to understand its unique entities (Product, Company), relationships (PRODUCES), and extraction guidelines.
 globs: mcp_server/entity_types/example/*.py
@@ -3790,10 +1876,10 @@ These guidelines supplement or specialize the instructions within the entity def
 ## 4. Future Evolution
 
 This schema may be expanded to include other entities (e.g., `Customer`, `Review`) and relationships (e.g., `SELLS`, `REVIEWS`) as the project needs evolve. Follow the process in `@graphiti-knowledge-graph-maintenance.md` to propose changes.
-````
+```
 
 ## File: rules/templates/project_schema_template.md
-````markdown
+```markdown
 ---
 description: Use this rule when working specifically within the '__PROJECT_NAME__' project context to understand its unique entities, relationships, and extraction guidelines.
 globs: # Add relevant globs for your project files, e.g., src/**/*.py
@@ -3850,10 +1936,10 @@ Example:
 ## 4. Future Evolution
 
 *Briefly mention potential future directions or areas for schema expansion.*
-````
+```
 
 ## File: rules/graphiti-knowledge-graph-maintenance.md
-````markdown
+```markdown
 ---
 description: Use this rule when you need to propose changes (additions, modifications) to a project's specific knowledge graph schema file (`graphiti-[project-name]-schema.md`).
 globs: 
@@ -3923,10 +2009,10 @@ Project knowledge schemas are expected to evolve. If you identify a need for a *
 - Mention any potential conflicts or considerations in your justification if significant.
 
 **Remember:** Maintaining an accurate and consistent project schema is crucial for reliable knowledge management and effective AI assistance within the project context.
-````
+```
 
 ## File: rules/graphiti-mcp-core-rules.md
-````markdown
+```markdown
 ---
 description: Use this rule first for general guidance on using Graphiti MCP server tools (entity extraction, memory). It explains the overall rule structure and links to project-specific schemas and maintenance procedures.
 globs: 
@@ -4044,10 +2130,10 @@ Maintaining a knowledge graph requires diligence. The goal is not just to store 
     *   **Maintenance & Validation:** Regularly assess the graph's accuracy and usefulness. Ensure data validity and consistency. Schemas evolve, so plan for iteration. ([Source: stardog.com](mdc:https:/www.stardog.com/building-a-knowledge-graph))
 
 Use the specific rules defined in `@graphiti-knowledge-graph-maintenance.md` when proposing changes to project schemas.
-````
+```
 
 ## File: .env.example
-````
+```
 # Graphiti MCP Server Environment Configuration
 
 # --- Required Secrets ---
@@ -4114,23 +2200,18 @@ GRAPHITI_LOG_LEVEL=info
 # Only uncomment and set to "true" when you specifically need to clear all data
 # Always comment out or set back to "false" immediately after use
 # NEO4J_DESTROY_ENTIRE_GRAPH=true
-````
-
-## File: .python-version
-````
-3.10
-````
+```
 
 ## File: .repomixignore
-````
+```
 # Add patterns to ignore here, one per line
 # Example:
 # *.log
 # tmp/
-````
+```
 
 ## File: base-compose.yaml
-````yaml
+```yaml
 # base-compose.yaml
 # Base structure for the Docker Compose configuration, including static services and anchors.
 
@@ -4233,39 +2314,133 @@ services:
 volumes:
   neo4j_data: # Persists Neo4j graph data
   neo4j_logs: # Persists Neo4j logs
-````
+```
 
-## File: custom_servers.yaml
-````yaml
-# custom_servers.yaml
-# Configuration for custom Graphiti MCP services.
-# Defaults:
-# - container variable: <ID>_CONTAINER_NAME (e.g., CIV7_CONTAINER_NAME)
-# - port variable: <ID>_PORT (e.g., CIV7_PORT)
-# - port default value: 8001, 8002, ... based on order in this list
-# - dir: entity_types/<id> (e.g., entity_types/civ7)
-# - group_id: <id> (e.g., civ7)
+## File: constants.py
+```python
+#!/usr/bin/env python3
+"""
+Shared constants for the Graphiti MCP server ecosystem.
+This module centralizes constants used across different components.
+"""
+import logging
 
-custom_mcp_servers:
-  - id: civ7 # Uses default container var (CIV7_CONTAINER_NAME), port var (CIV7_PORT:-8001), dir (entity_types/civ7), group_id (civ7)
+# --- Logging Constants ---
+# Constants related to Graphiti's logging mechanism
+DEFAULT_LOG_LEVEL_STR = "info"                 # Default logging level as a string
+DEFAULT_LOG_LEVEL = logging.INFO               # Default logging level as a Python logging constant
+ENV_GRAPHITI_LOG_LEVEL = "GRAPHITI_LOG_LEVEL"  # Environment variable name for configuring the logging level
 
-  - id: magic-api
-  
-  - id: filesystem
-    # Overriding default dir and setting types
-    # Uses default container var (FILESYSTEM_CONTAINER_NAME), port var (FILESYSTEM_PORT:-8002), group_id (filesystem)
-    dir: "entity_types/specific_fs" # Override default dir
-    types: "Requirement Preference"
+# --- Directory Structure Constants ---
+# Standard directories used in Graphiti project structure
+DIR_AI = "ai"                  # AI-related files
+DIR_GRAPH = "graph"            # Knowledge graph data
+DIR_ENTITIES = "entities"      # Entity definitions
+DIR_MCP_SERVER = "mcp_server"  # MCP server code
+DIR_ENTITY_TYPES = "entity_types"  # Entity type definitions for knowledge graph
+DIR_DIST = "dist"              # Distribution directory for built packages
 
-  - id: candidates
-    # Overriding default group_id and dir explicitly
-    # Uses default container var (CANDIDATES_CONTAINER_NAME), port var (CANDIDATES_PORT:-8003)
-    group_id: "graphiti-candidates" # Override default group_id
-    dir: "entity_types/candidates"  # Explicitly set dir (same as default here, just showing override)
-````
+# Standard files used in Graphiti projects
+FILE_GIT_KEEP = ".gitkeep"           # Placeholder to preserve empty directories in Git
+FILE_PYPROJECT_TOML = "pyproject.toml"  # Python project definition file
+
+# --- Regex Constants ---
+# Regular expression for validating entity and project names (alphanumeric, underscore, and hyphen)
+REGEX_VALID_NAME = r'^[a-zA-Z0-9_-]+$'
+
+# --- Environment Variable Constants ---
+# Environment variables used to configure Graphiti MCP server behavior
+ENV_REPO_PATH = "MCP_GRAPHITI_REPO_PATH"  # Path to the Graphiti MCP repository
+ENV_MCP_GROUP_ID = "MCP_GROUP_ID"         # Group ID (namespace) for graph data
+ENV_MCP_USE_CUSTOM_ENTITIES = "MCP_USE_CUSTOM_ENTITIES"  # Whether to use custom entity extraction
+ENV_MCP_USE_CUSTOM_ENTITIES_VALUE = "true"  # Value to enable custom entity extraction
+ENV_MCP_ENTITY_TYPE_DIR = "MCP_ENTITY_TYPE_DIR"  # Directory for custom entity type definitions
+
+# --- Container Path Constants ---
+# Paths used within Docker containers for entity type mounting
+CONTAINER_ENTITY_PATH = "/app/entity_types"  # Default entity types
+PROJECT_CONTAINER_ENTITY_PATH = "/app/project_entities"  # Project-specific entity definitions
+
+# --- Docker/Port Constants ---
+DEFAULT_PORT_START = 8000  # Starting port number for containers (assigned sequentially)
+DEFAULT_MCP_CONTAINER_PORT_VAR = "MCP_PORT"  # Environment variable for MCP server port
+
+# --- Default Model Constants ---
+DEFAULT_LLM_MODEL = "gpt-4o"  # Default language model to use if none specified
+
+# --- Registry and Compose File Constants ---
+# Filenames for Docker Compose and project registry configuration
+BASE_COMPOSE_FILENAME = "base-compose.yaml"  # Base Docker Compose template
+PROJECTS_REGISTRY_FILENAME = "mcp-projects.yaml"  # Central registry of Graphiti MCP projects
+DOCKER_COMPOSE_OUTPUT_FILENAME = "docker-compose.yml"  # Generated Docker Compose config
+
+# --- Configuration File Constants ---
+CONFIG_FILENAME = "mcp-config.yaml"  # Project-specific MCP configuration file
+ENTITY_FILE_EXTENSION = ".py"        # File extension for Python entity type definitions
+
+# --- Configuration Key Constants ---
+# Keys used in configuration files for MCP settings
+CONFIG_KEY_SERVICES = "services"            # Services section
+CONFIG_KEY_ID = "id"                        # Server ID
+CONFIG_KEY_CONTAINER_NAME = "container_name"  # Docker container name
+CONFIG_KEY_PORT_DEFAULT = "port_default"    # Default port
+CONFIG_KEY_GROUP_ID = "group_id"            # Group ID for namespacing
+CONFIG_KEY_ENTITY_DIR = "entity_dir"        # Entity directory path
+CONFIG_KEY_ENVIRONMENT = "environment"      # Environment variables
+
+# --- Registry File Key Constants ---
+# Keys used in the project registry file (mcp-projects.yaml)
+REGISTRY_PROJECTS_KEY = "projects"          # Dictionary of all projects
+REGISTRY_ROOT_DIR_KEY = "root_dir"          # Project root directory path
+REGISTRY_CONFIG_FILE_KEY = "config_file"    # Project config file path
+REGISTRY_ENABLED_KEY = "enabled"            # Project enabled status flag
+
+# --- Compose File Key Constants ---
+# Keys used in Docker Compose configuration files
+COMPOSE_SERVICES_KEY = "services"                  # Services section
+COMPOSE_CUSTOM_BASE_ANCHOR_KEY = "x-graphiti-mcp-custom-base"  # Base service anchor
+COMPOSE_CONTAINER_NAME_KEY = "container_name"      # Container name
+COMPOSE_PORTS_KEY = "ports"                        # Port mappings
+COMPOSE_ENVIRONMENT_KEY = "environment"            # Environment variables
+COMPOSE_VOLUMES_KEY = "volumes"                    # Volume mappings
+
+# --- Project Config Key Constants ---
+# Keys used in project-specific configuration files (mcp-config.yaml)
+PROJECT_SERVICES_KEY = "services"                  # Services section
+PROJECT_SERVER_ID_KEY = "id"                       # Server ID
+PROJECT_ENTITY_DIR_KEY = "entity_dir"              # Entity directory
+PROJECT_CONTAINER_NAME_KEY = "container_name"      # Container name
+PROJECT_PORT_DEFAULT_KEY = "port_default"          # Default port
+PROJECT_GROUP_ID_KEY = "group_id"                  # Group ID
+PROJECT_ENVIRONMENT_KEY = "environment"            # Environment variables
+
+# --- Default Value Constants ---
+# Default values used when specific settings are not provided
+DEFAULT_CUSTOM_CONTAINER_NAME = "custom-name"  # Default container name for custom services
+DEFAULT_CUSTOM_PORT = "8001"                   # Default port for custom services
+DEFAULT_ENTITY_DIR_NAME = "entities"           # Default name for entity directories
+
+# --- Service Name Constants ---
+SERVICE_NAME_PREFIX = "mcp-"  # Prefix used for all Graphiti MCP service names
+
+# --- ANSI Color Constants ---
+# ANSI escape codes used to color or format terminal output
+RED = '\033[0;31m'
+GREEN = '\033[0;32m'
+YELLOW = '\033[0;33m'
+BLUE = '\033[0;34m'
+CYAN = '\033[0;36m'
+BOLD = '\033[1m'
+NC = '\033[0m'  # Reset or "no color" code
+
+# --- Package Constants ---
+# Constants for package and dependency management
+PACKAGE_LOCAL_WHEEL_MARKER = "graphiti-core @ file:///dist/"  # Marker for local installations
+PACKAGE_PUBLISHED_PREFIX = "graphiti-core>="                  # Prefix for published packages
+```
 
 ## File: docker-compose.yml
-````yaml
+```yaml
 # Generated by graphiti CLI
 # Do not edit this file directly. Modify base-compose.yaml or project-specific mcp-config.yaml files instead.
 
@@ -4372,76 +2547,122 @@ services:
       MCP_GROUP_ID: filesystem
       MCP_USE_CUSTOM_ENTITIES: 'true'
       MCP_ENTITY_TYPE_DIR: /app/project_entities
+      GRAPHITI_LOG_LEVEL: debug
     container_name: mcp-filesystem-main
     ports:
       - 8001:${MCP_PORT}
     volumes:
-      - /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/entities:/app/project_entities:ro
+      - /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/ai/graph/entities:/app/project_entities:ro
+  mcp-filesystem-meta:
+    <<: *graphiti-mcp-custom-base
+    environment:
+      MCP_GROUP_ID: filesystem-meta
+      MCP_USE_CUSTOM_ENTITIES: 'true'
+      MCP_ENTITY_TYPE_DIR: /app/project_entities
+    container_name: mcp-filesystem-meta
+    ports:
+      - 8002:${MCP_PORT}
+    volumes:
+      - /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/ai/graph/entities:/app/project_entities:ro
+  mcp-magic-candidates-main:
+    <<: *graphiti-mcp-custom-base
+    environment:
+      MCP_GROUP_ID: magic-candidates
+      MCP_USE_CUSTOM_ENTITIES: 'true'
+      MCP_ENTITY_TYPE_DIR: /app/project_entities
+      GRAPHITI_LOG_LEVEL: debug
+    container_name: mcp-magic-candidates-main
+    ports:
+      - 8003:${MCP_PORT}
+    volumes:
+      - /Users/mateicanavra/Documents/.nosync/DEV/magic-apply-candidates/ai/graph/entities:/app/project_entities:ro
 volumes:
   neo4j_data: # Persists Neo4j graph data
   neo4j_logs: # Persists Neo4j logs
-````
+```
 
 ## File: Dockerfile
-````dockerfile
-FROM python:3.11-slim
+```dockerfile
+FROM --platform=$BUILDPLATFORM python:3.11-slim AS base
 
+# Set environment variables to prevent buffering issues with logs
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Set the working directory in the container
 WORKDIR /app
 
-# Install uv for package management
-RUN apt-get update && apt-get install -y curl && \
-    curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# Install curl, install uv, add its dir to the current PATH, and verify in one step
+RUN apt-get update && apt-get install -y curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    # Install uv using the recommended installer script
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    # Add uv's ACTUAL installation directory to the PATH for this RUN command's shell
+    && export PATH="/root/.local/bin:${PATH}" \
+    # Verify uv installation within the same RUN command
+    && uv --version
 
-# Add uv to PATH
+# Add uv's ACTUAL installation directory to the ENV PATH for subsequent stages and the final image
 ENV PATH="/root/.local/bin:${PATH}"
 
-# Create dist directory first
+# --- Build Stage ---
+# Use a build stage to install dependencies
+# This helps leverage Docker layer caching
+FROM base AS builder
+
+# Create dist directory for local wheel installation if needed
 RUN mkdir -p /dist/
 
-# Copy the dist directory with our local wheel to container root (if it exists)
+# Copy the dist directory contents (containing local wheels)
+# This step allows installing local packages like graphiti-core
+# Ensure 'dist' exists in your project root and contains necessary wheels before building
 COPY dist/* /dist/
 
-# Copy pyproject.toml and install dependencies
-COPY pyproject.toml .
-RUN uv sync
-# RUN chmod +x $(which uv)
+# Copy project configuration
+COPY pyproject.toml uv.lock* ./
 
-# Copy necessary application code and directories into /app/
-# The destination must end with '/' when copying directories
+# Install dependencies using uv sync (faster than pip install)
+# This installs dependencies specified in pyproject.toml based on uv.lock
+# Add --system to allow installation into the container's Python environment
+RUN uv pip sync uv.lock --system
+
+# If you want to install the project itself (mcp-server), uncomment the line below
+# This makes 'constants.py', 'graphiti_mcp_server.py', etc., available as installed modules
+# RUN uv pip install . --no-deps --system
+
+
+# --- Final Stage ---
+# Start from the base image again for a cleaner final image
+FROM base
+
+# Copy installed dependencies from the builder stage
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+# Also copy binaries installed by dependencies (like uv itself if installed via pip in builder)
+COPY --from=builder /root/.local/bin /root/.local/bin
+
+# Copy application code
 COPY graphiti_mcp_server.py ./
+COPY constants.py ./
 COPY entity_types/ ./entity_types/
-
-# --- Add Entrypoint Script ---
-# Copy the entrypoint script into the working directory
 COPY entrypoint.sh .
-# Make it executable
+
+# Make entrypoint script executable
 RUN chmod +x ./entrypoint.sh
-# ---------------------------
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
+# Expose the default MCP port (adjust if needed)
+EXPOSE 8000
 
-# # Create a non-root user and group
-# RUN groupadd --system appuser && useradd --system --gid appuser appuser
-
-# # Change ownership of the app directory to the new user
-# # Ensure entrypoint.sh is also owned correctly
-# RUN chown -R appuser:appuser /app
-
-# # Switch to the non-root user
-# USER appuser
-
-# --- Set Entrypoint ---
-# Use the script as the main container command
+# Set the entrypoint script to run when the container starts
 ENTRYPOINT ["./entrypoint.sh"]
 
-# Original CMD instruction has been replaced by the ENTRYPOINT above
-# CMD ["uv", "run", "graphiti_mcp_server.py"]
-````
+# Default command can be overridden (e.g., to specify group_id)
+# Example: docker run <image> --group-id my_project
+CMD ["--transport", "sse"]
+```
 
 ## File: entrypoint.sh
-````bash
+```bash
 #!/bin/sh
 # docker-entrypoint.sh
 # This script constructs and executes the graphiti_mcp_server command
@@ -4509,10 +2730,10 @@ echo "--------------------------------------------------"
 # "$@" passes along any arguments that might have been added via
 # 'command:' in docker-compose.yml (though we aren't using them here).
 exec $FULL_CMD "$@"
-````
+```
 
 ## File: graphiti_mcp_server.py
-````python
+```python
 #!/usr/bin/env python3
 """
 Graphiti MCP Server - Exposes Graphiti functionality through the Model Context Protocol (MCP)
@@ -4522,13 +2743,14 @@ import argparse
 import asyncio
 import importlib
 import importlib.util
+import json
 import logging
 import os
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, TypedDict, Union, cast
+from typing import Any, Dict, List, Optional, TypedDict, Union, cast
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
@@ -4547,11 +2769,9 @@ from graphiti_core.search.search_config_recipes import (
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
 from entity_types import get_entity_types, get_entity_type_subset, register_entity_type
+from constants import DEFAULT_LOG_LEVEL, DEFAULT_LLM_MODEL, ENV_GRAPHITI_LOG_LEVEL
 
 load_dotenv()
-
-DEFAULT_LLM_MODEL = 'gpt-4o'
-DEFAULT_LOG_LEVEL = logging.INFO
 
 # The ENTITY_TYPES dictionary is managed by the registry in mcp_server.entity_types
 # NOTE: This global reference is only used for predefined entity subsets below.
@@ -4643,7 +2863,7 @@ class MCPConfig(BaseModel):
 
 
 # Configure logging
-log_level_str = os.environ.get('GRAPHITI_LOG_LEVEL', 'info').upper()
+log_level_str = os.environ.get(ENV_GRAPHITI_LOG_LEVEL, 'info').upper()
 log_level = getattr(logging, log_level_str, DEFAULT_LOG_LEVEL)
 
 logging.basicConfig(
@@ -4823,7 +3043,7 @@ async def process_episode_queue(group_id: str):
 @mcp.tool()
 async def add_episode(
     name: str,
-    episode_body: str,
+    episode_body: Union[str, Dict[str, Any], List[Any]],
     group_id: Optional[str] = None,
     source: str = 'text',
     source_description: str = '',
@@ -4837,9 +3057,12 @@ async def add_episode(
 
     Args:
         name (str): Name of the episode
-        episode_body (str): The content of the episode. When source='json', this must be a properly escaped JSON string,
-                           not a raw Python dictionary. The JSON data will be automatically processed
-                           to extract entities and relationships.
+        episode_body (Union[str, Dict[str, Any], List[Any]]): The content of the episode.
+                           When source='json', this can be either:
+                           - A Python dictionary or list that will be automatically serialized, or
+                           - A properly escaped JSON string.
+                           The JSON data will be automatically processed to extract entities and relationships.
+                           For other source types, this must be a string.
         group_id (str, optional): A unique ID for this graph. If not provided, uses the default group_id from CLI
                                  or a generated one.
         source (str, optional): Source type, must be one of:
@@ -4861,8 +3084,15 @@ async def add_episode(
             group_id="some_arbitrary_string"
         )
 
-        # Adding structured JSON data
-        # NOTE: episode_body must be a properly escaped JSON string. Note the triple backslashes
+        # Adding structured JSON data as a Python dictionary (preferred method)
+        add_episode(
+            name="Customer Profile",
+            episode_body={"company": {"name": "Acme Technologies"}, "products": [{"id": "P001", "name": "CloudSync"}, {"id": "P002", "name": "DataMiner"}]},
+            source="json",
+            source_description="CRM data"
+        )
+        
+        # Adding structured JSON data as a pre-serialized string (alternative method)
         add_episode(
             name="Customer Profile",
             episode_body="{\\\"company\\\": {\\\"name\\\": \\\"Acme Technologies\\\"}, \\\"products\\\": [{\\\"id\\\": \\\"P001\\\", \\\"name\\\": \\\"CloudSync\\\"}, {\\\"id\\\": \\\"P002\\\", \\\"name\\\": \\\"DataMiner\\\"}]}",
@@ -4890,11 +3120,14 @@ async def add_episode(
 
     Notes:
         When using source='json':
-        - The JSON must be a properly escaped string, not a raw Python dictionary
+        - For convenience, you can provide a Python dictionary or list directly (recommended method)
+        - Alternatively, you can provide a properly escaped JSON string
         - The JSON will be automatically processed to extract entities and relationships
         - Complex nested structures are supported (arrays, nested objects, mixed data types), but keep nesting to a minimum
         - Entities will be created from appropriate JSON properties
         - Relationships between entities will be established based on the JSON structure
+        
+        For source='text' and source='message', only string inputs are accepted.
     """
     global graphiti_client, episode_queues, queue_workers
 
@@ -4922,6 +3155,41 @@ async def add_episode(
 
         # Use cast to help the type checker understand that graphiti_client is not None
         client = cast(Graphiti, graphiti_client)
+        
+        # Input validation and preparation
+        episode_body_str = ""
+        if source_type == EpisodeType.json:
+            # For JSON source, we accept both dictionaries/lists and pre-serialized strings
+            if isinstance(episode_body, (dict, list)):
+                try:
+                    episode_body_str = json.dumps(episode_body)
+                    logger.debug(f"Successfully serialized dictionary/list to JSON string")
+                except TypeError as e:
+                    error_msg = f"Failed to serialize episode_body to JSON: {str(e)}"
+                    logger.error(error_msg)
+                    return {'error': error_msg}
+            elif isinstance(episode_body, str):
+                # Optionally validate the JSON string
+                try:
+                    json.loads(episode_body)  # Just for validation
+                    episode_body_str = episode_body
+                    logger.debug(f"Verified episode_body is a valid JSON string")
+                except json.JSONDecodeError as e:
+                    error_msg = f"Invalid JSON string provided for episode_body: {str(e)}"
+                    logger.error(error_msg)
+                    return {'error': error_msg}
+            else:
+                error_msg = f"Invalid episode_body type for source='json': {type(episode_body)}. Expected dict, list, or string."
+                logger.error(error_msg)
+                return {'error': error_msg}
+        else:
+            # For text and message sources, we only accept strings
+            if isinstance(episode_body, str):
+                episode_body_str = episode_body
+            else:
+                error_msg = f"Invalid episode_body type for source='{source}': {type(episode_body)}. Expected string."
+                logger.error(error_msg)
+                return {'error': error_msg}
 
         # Define the episode processing function
         async def process_episode():
@@ -4957,7 +3225,7 @@ async def add_episode(
 
                 await client.add_episode(
                     name=name,
-                    episode_body=episode_body,
+                    episode_body=episode_body_str,
                     source=source_type,
                     source_description=source_description,
                     group_id=group_id_str,  # Using the string version of group_id
@@ -5556,10 +3824,10 @@ def load_entity_types_from_directory(directory_path: str) -> None:
 
 if __name__ == '__main__':
     main()
-````
+```
 
 ## File: mcp_config_sse_example.json
-````json
+```json
 {
     "mcpServers": {
         "graphiti": {
@@ -5568,10 +3836,10 @@ if __name__ == '__main__':
         }
     }
 }
-````
+```
 
 ## File: mcp_config_stdio_example.json
-````json
+```json
 {
     "mcpServers": {
         "graphiti": {
@@ -5593,10 +3861,10 @@ if __name__ == '__main__':
         }
     }
 }
-````
+```
 
 ## File: mcp-projects.yaml
-````yaml
+```yaml
 # !! WARNING: This file is managed by the 'graphiti init' command. !!
 # !! Avoid manual edits unless absolutely necessary.                 !!
 #
@@ -5613,10 +3881,15 @@ projects:
     config_file: 
       /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/ai/graph/mcp-config.yaml
     enabled: true
-````
+  magic-candidates:
+    root_dir: /Users/mateicanavra/Documents/.nosync/DEV/magic-apply-candidates
+    config_file: 
+      /Users/mateicanavra/Documents/.nosync/DEV/magic-apply-candidates/ai/graph/mcp-config.yaml
+    enabled: true
+```
 
 ## File: pyproject.toml
-````toml
+```toml
 [project]
 name = "mcp-server"
 version = "0.1.0"
@@ -5644,12 +3917,16 @@ build-backend = "setuptools.build_meta"
 
 # Explicitly specify packages to include
 [tool.setuptools.packages.find]
-include = ["graphiti_cli*"]
-exclude = ["entity_types*", "rules*", "llm_cache*"]
-````
+where = ["."]  # Look in the current directory (mcp_server)
+include = ["graphiti_cli"]  # Only include the CLI package
+
+# Add py_modules to include individual Python files (like constants.py)
+[tool.setuptools]
+py-modules = ["constants"]
+```
 
 ## File: repomix.config.json
-````json
+```json
 {
   "output": {
     "filePath": "graphiti-mcp-repo.md",
@@ -5676,11 +3953,18 @@ exclude = ["entity_types*", "rules*", "llm_cache*"]
       ".venv/**",
       "uv.lock",
       "dist/**",
-      ".ai/.archive/**",
+      ".ai/**",
       "llm_cache/**",
       "scripts/README.md",
       "README.md",
-      "docs/**"
+      "docs/**",
+      "*.egg-info/**",
+      "__pycache__/**",
+      "*.pyc",
+      "*.pyo",
+      ".python-version",
+      ".env",
+      "*.log"
     ]
   },
   "security": {
@@ -5690,4 +3974,4 @@ exclude = ["entity_types*", "rules*", "llm_cache*"]
     "encoding": "o200k_base"
   }
 }
-````
+```

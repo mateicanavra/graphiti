@@ -24,11 +24,18 @@
       ".venv/**",
       "uv.lock",
       "dist/**",
-      ".ai/.archive/**",
+      ".ai/**",
       "llm_cache/**",
       "scripts/README.md",
       "README.md",
-      "docs/**"
+      "docs/**",
+      "*.egg-info/**",
+      "__pycache__/**",
+      "*.pyc",
+      "*.pyo",
+      ".python-version",
+      ".env",
+      "*.log"
     ]
   },
   "security": {

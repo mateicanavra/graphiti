@@ -1,338 +1,198 @@
-# Graphiti MCP Server
+# Graphiti MCP Server Orchestrator
 
-Graphiti is a framework for building and querying temporally-aware knowledge graphs, specifically tailored for AI agents operating in dynamic environments. Unlike traditional retrieval-augmented generation (RAG) methods, Graphiti continuously integrates user interactions, structured and unstructured enterprise data, and external information into a coherent, queryable graph. The framework supports incremental data updates, efficient retrieval, and precise historical queries without requiring complete graph recomputation, making it suitable for developing interactive, context-aware AI applications.
+This repository contains the central orchestrator for deploying and managing the Graphiti Model Context Protocol (MCP) ecosystem. Its primary role is to manage the deployment of:
 
-This is an experimental Model Context Protocol (MCP) server implementation for Graphiti. The MCP server exposes Graphiti's key functionality through the MCP protocol, allowing AI assistants to interact with Graphiti's knowledge graph capabilities.
+1.  A shared **Neo4j** database instance.
+2.  A **root Graphiti MCP server** (`graphiti-mcp-root`) providing base functionality.
+3.  Multiple **project-specific Graphiti MCP server instances** defined in external project directories.
 
-## Features
+It uses a configuration-driven approach (`mcp-projects.yaml`) and helper scripts (`./scripts/graphiti`) to generate a unified `docker-compose.yml` file for all services.
 
-The Graphiti MCP server exposes the following key high-level functions of Graphiti:
+## Architecture Overview
 
-- **Episode Management**: Add, retrieve, and delete episodes (text, messages, or JSON data)
-- **Entity Management**: Search and manage entity nodes and relationships in the knowledge graph
-- **Search Capabilities**: Search for facts (edges) and node summaries using semantic and hybrid search
-- **Group Management**: Organize and manage groups of related data with group_id filtering
-- **Graph Maintenance**: Clear the graph and rebuild indices
+*   **`mcp-projects.yaml`**: A central registry mapping project names to their configurations, including paths to their specific entity definitions and root directories. **Requires manual editing after cloning.**
+*   **`base-compose.yaml`**: A Docker Compose template defining base service configurations (like Neo4j settings, common MCP server environment variables) using YAML anchors.
+*   **`scripts/graphiti`**: A bash script that reads `mcp-projects.yaml` and `base-compose.yaml` to generate the final `docker-compose.yml` and provides commands (`compose`, `up`, `down`, `logs`, `ps`) to manage the entire stack of services.
+*   **`Dockerfile` / `graphiti_mcp_server.py`**: Defines the container image and runs the code for the *root* MCP server instance (`graphiti-mcp-root`) and serves as the base for project-specific instances unless they override.
+*   **`graphiti_cli/`**: Contains a Python-based CLI (`graphiti`) installable via `uv pip install .`. This offers some utility commands but is **not** the primary tool for managing the Docker services orchestrated by this repository (use `./scripts/graphiti` for that).
 
-## Installation
+## Prerequisites
 
-### Prerequisites
+Ensure you have the following installed:
 
-1. Ensure you have Python 3.10 or higher installed.
-2. A running Neo4j database (version 5.26 or later required)
-3. OpenAI API key for LLM operations
+1.  **Python**: Version 3.11 or higher (for running scripts).
+2.  **uv**: The Python package installer/resolver (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+3.  **Docker**: The containerization platform.
+4.  **Docker Compose**: The tool for defining and running multi-container Docker applications (usually included with Docker Desktop).
+5.  **Git**: For cloning the repository.
 
-### Setup
+## Setup & Configuration
 
-1. Clone the repository and navigate to the mcp_server directory
-2. Use `uv` to create a virtual environment and install dependencies:
+1.  **Clone the Repository:**
+    ```bash
+    git clone <repository_url> # Replace with the actual URL
+    cd graphiti-mcp-orchestrator # Or the name you cloned it as
+    ```
 
-```bash
-# Install uv if you don't have it already
-curl -LsSf https://astral.sh/uv/install.sh | sh
+2.  **Create & Activate Virtual Environment:**
+    This is needed for the Python scripts used by the orchestrator.
+    ```bash
+    uv venv
+    source .venv/bin/activate # (Adjust for your OS/shell if needed)
+    ```
 
-# Create a virtual environment and install dependencies in one step
-uv sync
-```
+3.  **Install Dependencies:**
+    Installs dependencies required by the orchestration scripts and the underlying server code.
+    ```bash
+    uv sync
+    ```
 
-## Configuration
+4.  **Configure Environment Secrets (`.env`):**
+    Copy the example file and add your secrets.
+    ```bash
+    cp .env.example .env
+    ```
+    Edit `.env` and provide:
+    *   `OPENAI_API_KEY`: Your OpenAI API key (required for LLM features).
+    *   `MODEL_NAME`: e.g., `gpt-4o` (required).
+    *   `NEO4J_USER` / `NEO4J_PASSWORD`: Credentials for the Neo4j database (defaults match the included Neo4j service).
+    *   Optionally adjust other variables like `NEO4J_HOST_HTTP_PORT`, `NEO4J_HOST_BOLT_PORT`, `MCP_ROOT_HOST_PORT` if defaults conflict.
 
-The server uses the following environment variables:
+5.  **Configure Project Registry (`mcp-projects.yaml`) - CRITICAL STEP:**
+    This file tells the orchestrator where to find the configuration and entity definitions for each project-specific MCP server you want to run.
 
-- `NEO4J_URI`: URI for the Neo4j database (default: `bolt://localhost:7687`)
-- `NEO4J_USER`: Neo4j username (default: `neo4j`)
-- `NEO4J_PASSWORD`: Neo4j password (default: `demodemo`)
-- `OPENAI_API_KEY`: OpenAI API key (required for LLM operations)
-- `OPENAI_BASE_URL`: Optional base URL for OpenAI API
-- `MODEL_NAME`: Optional model name to use for LLM inference
+    **You MUST edit `mcp-projects.yaml` after cloning.**
 
-You can set these variables in a `.env` file in the project directory.
+    *   Open `mcp-projects.yaml`.
+    *   For each project listed under the `projects:` key:
+        *   Verify the `enabled: true` status for projects you want to run.
+        *   **Crucially, update the `config_file` and `root_dir` paths to be correct, absolute paths on the machine where you will run the `./scripts/graphiti` commands.** These paths are used to mount project-specific files (like entity definitions) into their respective Docker containers.
+    *   Example project entry:
+        ```yaml
+        projects:
+          mcp-filesystem:
+            config_file: /ABSOLUTE/PATH/TO/mcp-filesystem/mcp-config.yaml # EDIT THIS PATH
+            root_dir: /ABSOLUTE/PATH/TO/mcp-filesystem # EDIT THIS PATH
+            enabled: true
+        ```
+    *   **Failure to set correct absolute paths here is the most common reason for errors.**
 
-## Running the Server
+## Core Orchestration Workflow (`./scripts/graphiti`)
 
-To run the Graphiti MCP server directly using `uv`:
+The primary way to manage the services defined by this orchestrator is via the `scripts/graphiti` bash script. Ensure your virtual environment is active (`source .venv/bin/activate`).
 
-```bash
-uv run graphiti_mcp_server.py
-```
+1.  **Generate Docker Compose File:**
+    Reads `mcp-projects.yaml` and `base-compose.yaml` to create/update `docker-compose.yml`.
+    ```bash
+    ./scripts/graphiti compose
+    ```
+    *You should run this command whenever you add/remove projects or change configurations in `mcp-projects.yaml` or `base-compose.yaml`.*
 
-With options:
+2.  **Start All Services:**
+    Starts Neo4j, `graphiti-mcp-root`, and all enabled project-specific MCP servers defined in the generated `docker-compose.yml`.
+    ```bash
+    # Start in detached mode (background)
+    ./scripts/graphiti up -d
 
-```bash
-uv run graphiti_mcp_server.py --model gpt-4o --transport sse
-```
+    # Start in foreground (to see logs directly)
+    # ./scripts/graphiti up
+    ```
+    The first time you run `up`, it might also build the Docker image if needed.
 
-Available arguments:
+3.  **Check Service Status:**
+    ```bash
+    ./scripts/graphiti ps
+    ```
 
-- `--model`: Specify the model name to use with the LLM client
-- `--transport`: Choose the transport method (sse or stdio, default: sse)
-- `--group-id`: Set a namespace for the graph (optional)
-- `--destroy-graph`: Destroy all Graphiti graphs (use with caution)
-- `--use-custom-entities`: Enable entity extraction using the predefined ENTITY_TYPES
+4.  **View Logs:**
+    ```bash
+    # View logs for a specific service (e.g., the root server)
+    ./scripts/graphiti logs graphiti-mcp-root
 
-## Docker Deployment
+    # View logs for Neo4j
+    # ./scripts/graphiti logs neo4j
 
-The Graphiti MCP server can be deployed using Docker. The Dockerfile uses `uv` for package management, ensuring consistent dependency installation.
+    # View logs for a project-specific server (use the container name from `ps` or compose file)
+    # ./scripts/graphiti logs mcp-filesystem-main
 
-### Environment Configuration
+    # Follow logs in real-time
+    # ./scripts/graphiti logs -f <service_name>
+    ```
 
-Before running the Docker Compose setup, you need to configure the environment variables. You have two options:
+5.  **Stop All Services:**
+    Stops and removes the containers.
+    ```bash
+    ./scripts/graphiti down
+    ```
+    *   Add the `-v` flag (`./scripts/graphiti down -v`) to also remove the named volumes (like Neo4j data).
 
-1. **Using a .env file** (recommended):
+## Managing Projects
 
-   - Copy the provided `.env.example` file to create a `.env` file:
-     ```bash
-     cp .env.example .env
-     ```
-   - Edit the `.env` file to set your OpenAI API key and other configuration options:
-     ```
-     # Required for LLM operations
-     OPENAI_API_KEY=your_openai_api_key_here
-     MODEL_NAME=gpt-4o
-     # Optional: OPENAI_BASE_URL only needed for non-standard OpenAI endpoints
-     # OPENAI_BASE_URL=https://api.openai.com/v1
-     ```
-   - The Docker Compose setup is configured to use this file if it exists (it's optional)
+*   **To Add a New Project:** Add its definition (including correct absolute paths) to `mcp-projects.yaml`, set `enabled: true`, then run `./scripts/graphiti compose` and `./scripts/graphiti up -d`.
+*   **To Disable a Project:** Set `enabled: false` in `mcp-projects.yaml`, run `./scripts/graphiti compose` and `./scripts/graphiti up -d`. The compose tool should handle stopping/removing the disabled service.
+*   **To Remove a Project:** Delete its entry from `mcp-projects.yaml`, run `./scripts/graphiti compose` and `./scripts/graphiti up -d`.
 
-2. **Using environment variables directly**:
-   - You can also set the environment variables when running the Docker Compose command:
-     ```bash
-     OPENAI_API_KEY=your_key MODEL_NAME=gpt-4o docker compose up
-     ```
+## Python CLI (`graphiti` via `pip install .`)
 
-### Neo4j Configuration
-
-The Docker Compose setup includes a Neo4j container with the following default configuration:
-
-- Username: `neo4j`
-- Password: `demodemo`
-- URI: `bolt://neo4j:7687` (from within the Docker network)
-- Memory settings optimized for development use
-
-## Project-Based Architecture
-
-The Graphiti MCP server uses a centralized, project-based architecture that allows different projects to define their own custom MCP servers while sharing a single Neo4j instance and core server.
-
-### Project Configuration
-
-Each project defines its custom MCP server configuration in an `mcp-config.yaml` file:
-
-```yaml
-# Configuration for project: project-name
-services:
-  - id: project-main         # Service ID (used for default naming)
-    # container_name: "custom-name" # Optional: Specify custom container name
-    # port_default: 8001           # Optional: Specify custom host port
-    group_id: "project-name"     # Graph group ID
-    entity_dir: "entities"       # Relative path to entity definitions within project
-    # environment:                 # Optional: Add non-secret env vars here
-    #   MY_FLAG: "true"
-```
-
-### Central Registry
-
-All projects are registered in a central `mcp-projects.yaml` file in the `mcp-server` repository:
-
-```yaml
-# Maps project names to their configuration details
-projects:
-  project-name:
-    config_file: /absolute/path/to/project-name/mcp-config.yaml
-    root_dir: /absolute/path/to/project-name
-    enabled: true
-```
-
-### Docker Compose Generation
-
-The system automatically generates a `docker-compose.yml` file based on:
-- A base configuration (`base-compose.yaml`)
-- All enabled projects in the central registry
-
-This allows multiple projects to share a single Neo4j instance and core MCP server while maintaining isolation between different projects' entity types and data.
-
-### Project Setup
-
-To set up a new project:
+This repository also contains a Python CLI tool in `graphiti_cli/`. You can install it into your virtual environment:
 
 ```bash
-cd /path/to/your/project
-/path/to/mcp-server/scripts/graphiti init project-name .
+source .venv/bin/activate
+uv pip install .
 ```
 
-This will:
-1. Create a template `mcp-config.yaml` in your project directory
-2. Create an `entities/` directory for your custom entity definitions
-3. Register your project in the central `mcp-projects.yaml` with absolute paths
-4. Set up cursor rules in your project
-
-### Running Services
-
-All services are managed centrally from the `mcp-server` directory:
+Now you can run the `graphiti` command:
 
 ```bash
-cd /path/to/mcp-server
-./scripts/graphiti compose   # Generate the docker-compose.yml
-./scripts/graphiti up -d     # Start all services
-./scripts/graphiti down      # Stop all services
-./scripts/graphiti restart   # Restart all services
+graphiti --help
+# Potentially useful commands like `graphiti init` might be intended for use
+# *within external project directories* to set up their structure.
+# Refer to the CLI's help output or source code (`graphiti_cli/main.py`) for details.
 ```
 
-### Running Services
+**Important:** This Python `graphiti` CLI is generally **NOT** used for managing the Docker services within *this* orchestrator repository. Use the `./scripts/graphiti` bash script for generating the compose file and managing the service lifecycle (`up`, `down`, `logs`, etc.).
 
-To run the Graphiti MCP server with Docker Compose:
+## Connecting MCP Clients
 
-```bash
-docker compose up
-```
+Clients connect to individual MCP server instances, each running on a specific port.
 
-Or if you're using an older version of Docker Compose:
+*   **Root Server:** The `graphiti-mcp-root` service typically runs on the host port specified by `MCP_ROOT_HOST_PORT` in your `.env` file (default: 8000).
+*   **Project Servers:** Project-specific servers are assigned ports sequentially, starting from 8001 by default (see comments in `docker-compose.yml` after generation). You can find the exact host port mapping by running `./scripts/graphiti ps` or inspecting the generated `docker-compose.yml`.
 
-```bash
-docker-compose up
-```
-
-This will start both the Neo4j database and the Graphiti MCP server. The Docker setup:
-
-- Uses `uv` for package management and running the server
-- Installs dependencies from the `pyproject.toml` file
-- Connects to the Neo4j container using the environment variables
-- Exposes the server on port 8000 for HTTP-based SSE transport
-- Includes a healthcheck for Neo4j to ensure it's fully operational before starting the MCP server
-
-## Integrating with MCP Clients
-
-### Configuration
-
-To use the Graphiti MCP server with an MCP-compatible client, configure it to connect to the server:
-
+**Example SSE Configuration (for Root Server):**
 ```json
 {
   "mcpServers": {
-    "graphiti": {
-      "transport": "stdio",
-      "command": "uv",
-      "args": [
-        "run",
-        "/ABSOLUTE/PATH/TO/graphiti_mcp_server.py",
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "NEO4J_URI": "bolt://localhost:7687",
-        "NEO4J_USER": "neo4j",
-        "NEO4J_PASSWORD": "demodemo",
-        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-        "MODEL_NAME": "gpt-4o"
-      }
-    }
-  }
-}
-```
-
-For SSE transport (HTTP-based), you can use this configuration:
-
-```json
-{
-  "mcpServers": {
-    "graphiti": {
+    "graphiti-root": {
       "transport": "sse",
-      "url": "http://localhost:8000/sse"
+      "url": "http://localhost:8000/sse" // Use port from MCP_ROOT_HOST_PORT
     }
   }
 }
 ```
 
-Or start the server with uv and connect to it:
-
+**Example SSE Configuration (for a Project Server, e.g., on host port 8001):**
 ```json
 {
   "mcpServers": {
-    "graphiti": {
-      "command": "uv",
-      "args": [
-        "run",
-        "/ABSOLUTE/PATH/TO/graphiti_mcp_server.py",
-        "--transport",
-        "sse"
-      ],
-      "env": {
-        "NEO4J_URI": "bolt://localhost:7687",
-        "NEO4J_USER": "neo4j",
-        "NEO4J_PASSWORD": "demodemo",
-        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-        "MODEL_NAME": "gpt-4o"
-      }
+    "graphiti-filesystem": {
+      "transport": "sse",
+      "url": "http://localhost:8001/sse" // Use assigned project port
     }
   }
 }
 ```
 
-## Available Tools
+(Stdio configurations are less common for multi-service Docker setups but could be adapted if needed, pointing the command to execute *inside* the specific container).
 
-The Graphiti MCP server exposes the following tools:
+## Available MCP Tools (Root Server)
 
-- `add_episode`: Add an episode to the knowledge graph (supports text, JSON, and message formats)
-- `search_nodes`: Search the knowledge graph for relevant node summaries
-- `search_facts`: Search the knowledge graph for relevant facts (edges between entities)
-- `delete_entity_edge`: Delete an entity edge from the knowledge graph
-- `delete_episode`: Delete an episode from the knowledge graph
-- `get_entity_edge`: Get an entity edge by its UUID
-- `get_episodes`: Get the most recent episodes for a specific group
-- `clear_graph`: Clear all data from the knowledge graph and rebuild indices
-- `get_status`: Get the status of the Graphiti MCP server and Neo4j connection
+The `graphiti-mcp-root` server instance exposes base Graphiti MCP tools:
 
-For detailed usage instructions, known issues, and best practices, see the [MCP Tools Usage Guide](./docs/MCP_TOOLS_USAGE.md).
+-   `add_episode`, `search_nodes`, `search_facts`, `delete_entity_edge`, `delete_episode`, `get_entity_edge`, `get_episodes`, `clear_graph`, `get_status`.
 
-## Working with JSON Data
-
-The Graphiti MCP server can process structured JSON data through the `add_episode` tool with `source="json"`. This allows you to automatically extract entities and relationships from structured data:
-
-```
-add_episode(
-    name="Customer Profile",
-    episode_body="{\"company\": {\"name\": \"Acme Technologies\"}, \"products\": [{\"id\": \"P001\", \"name\": \"CloudSync\"}, {\"id\": \"P002\", \"name\": \"DataMiner\"}]}",
-    source="json",
-    source_description="CRM data"
-)
-```
-
-## Integrating with the Cursor IDE
-
-To integrate the Graphiti MCP Server with the Cursor IDE, follow these steps:
-
-1. Run the Graphiti MCP server using the SSE transport:
-
-```bash
-python graphiti_mcp_server.py --transport sse --use-custom-entities --group-id <your_group_id>
-```
-
-Hint: specify a `group_id` to retain prior graph data. If you do not specify a `group_id`, the server will create a new graph
-
-2. Configure Cursor to connect to the Graphiti MCP server.
-
-```json
-{
-  "mcpServers": {
-    "Graphiti": {
-      "url": "http://localhost:8000/sse"
-    }
-  }
-}
-```
-
-3. Add the Graphiti rules to Cursor's User Rules. See [cursor_rules.md](cursor_rules.md) for details.
-
-4. Kick off an agent session in Cursor.
-
-The integration enables AI assistants in Cursor to maintain persistent memory through Graphiti's knowledge graph capabilities.
-
-## Requirements
-
-- Python 3.10 or higher
-- Neo4j database (version 5.26 or later required)
-- OpenAI API key (for LLM operations and embeddings)
-- MCP-compatible client
+Project-specific servers may expose additional or specialized tools based on their configuration.
 
 ## License
 
-This project is licensed under the same license as the Graphiti project.
+Refer to the main Graphiti project repository for license details.
