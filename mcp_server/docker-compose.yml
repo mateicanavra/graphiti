@@ -120,6 +120,17 @@ services:
       MCP_GROUP_ID: test-project-2
       MCP_USE_CUSTOM_ENTITIES: 'true'
       MCP_ENTITY_TYPE_DIR: /app/project_entities
+  mcp-filesystem-main:
+    <<: *graphiti-mcp-custom-base
+    container_name: mcp-filesystem-main
+    ports:
+      - 8003:${MCP_ROOT_CONTAINER_PORT:-8000}
+    volumes:
+      - /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/entities:/app/project_entities:ro
+    environment:
+      MCP_GROUP_ID: filesystem
+      MCP_USE_CUSTOM_ENTITIES: 'true'
+      MCP_ENTITY_TYPE_DIR: /app/project_entities
 volumes:
   neo4j_data: # Persists Neo4j graph data
   neo4j_logs: # Persists Neo4j logs 

@@ -28,7 +28,7 @@ fi
 
 # --entity-type-dir (Optional path)
 if [ -n "$MCP_ENTITY_TYPE_DIR" ]; then
-  CMD_ARGS="$CMD_ARGS --entity-type-dir \"$MCP_ENTITY_TYPE_DIR\""
+  CMD_ARGS="$CMD_ARGS --entity-type-dir $MCP_ENTITY_TYPE_DIR"
 fi
 
 # --entity-types (Optional space-separated list)

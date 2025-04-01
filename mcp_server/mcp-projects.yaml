@@ -25,3 +25,8 @@ projects:
     config_file: 
       /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/test-project-2/mcp-config.yaml
     enabled: true
+  filesystem:
+    root_dir: /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem
+    config_file: 
+      /Users/mateicanavra/Documents/.nosync/DEV/mcp-servers/mcp-filesystem/mcp-config.yaml
+    enabled: true

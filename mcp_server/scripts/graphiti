@@ -21,11 +21,15 @@ usage() {
   echo -e "  ${CYAN}up${NC} [-d] [--log-level LEVEL]    Start all containers using docker compose. Use -d for detached mode."
   echo -e "  ${CYAN}down${NC} [--log-level LEVEL]       Stop and remove all containers using docker compose."
   echo -e "  ${CYAN}restart${NC} [--log-level LEVEL]    Restart all containers: runs 'down' followed by 'up'."
+  echo -e "  ${CYAN}reload${NC} SERVICE_NAME            Restart a specific running service container to reload code changes."
   echo -e "  ${CYAN}compose${NC}                        Generate docker-compose.yml file from base-compose.yaml and mcp-projects.yaml."
   echo
   echo -e "${BOLD}Arguments for init & rules:${NC}"
   echo -e "  ${BOLD}PROJECT_NAME${NC}  Name of the target project (used for schema filename)."
   echo -e "  ${BOLD}DIR${NC}           Optional. Target project root directory. Defaults to current directory (.)."
+  echo
+  echo -e "${BOLD}Arguments for reload:${NC}"
+  echo -e "  ${BOLD}SERVICE_NAME${NC}  Name of the service to reload (e.g., mcp-alpha-main)."
   echo
   echo -e "${BOLD}Options:${NC}"
   echo -e "  ${BOLD}-h, --help${NC}                Show this help message and exit."
@@ -734,6 +738,49 @@ elif [[ "$COMMAND" == "compose" ]]; then
   
   # Return to original directory
   cd "$CURRENT_DIR"
+  
+  exit $RESULT
+
+elif [[ "$COMMAND" == "reload" ]]; then
+  # Get SERVICE_NAME from first remaining argument
+  SERVICE_NAME="$1"
+  
+  # Input validation
+  if [ -z "$SERVICE_NAME" ]; then
+    echo -e "${RED}Error: Missing SERVICE_NAME argument for reload command.${NC}"
+    echo -e "Usage: ${CYAN}graphiti reload SERVICE_NAME${NC}"
+    exit 1
+  fi
+  
+  # We need to run docker compose from the mcp_server directory
+  MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
+  
+  if [ ! -d "$MCP_SERVER_DIR" ]; then
+    echo -e "${RED}Error: mcp_server directory not found at $MCP_SERVER_DIR${NC}"
+    exit 1
+  fi
+  
+  # Save current directory to return to it afterwards
+  CURRENT_DIR=$(pwd)
+  
+  # Change to mcp_server directory where docker-compose.yml is located
+  cd "$MCP_SERVER_DIR"
+  
+  # Execute the restart command
+  echo -e "${BOLD}Attempting to restart service '${CYAN}$SERVICE_NAME${NC}'...${NC}"
+  # Use docker compose restart which handles finding the container by service name
+  docker compose restart "$SERVICE_NAME"
+  RESULT=$?
+  
+  # Return to original directory
+  cd "$CURRENT_DIR"
+  
+  # Provide feedback
+  if [ $RESULT -eq 0 ]; then
+    echo -e "${GREEN}Service '$SERVICE_NAME' restarted successfully.${NC}"
+  else
+    echo -e "${RED}Error: Failed to restart service '$SERVICE_NAME'. Check if the service name is correct and the stack is running.${NC}"
+  fi
   
   exit $RESULT
 
