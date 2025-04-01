@@ -133,6 +133,7 @@ def run_command(
 ) -> subprocess.CompletedProcess:
     """
     Run a command in a subprocess with proper error handling.
+    Output is streamed to stdout/stderr by default.
     
     Args:
         cmd (List[str]): Command and arguments as a list
@@ -157,11 +158,13 @@ def run_command(
             env=merged_env,
             cwd=cwd,
             text=True,
-            capture_output=True
+            capture_output=False  # Allow output to stream to terminal
         )
     except subprocess.CalledProcessError as e:
         print(f"{RED}Error: Command failed with exit code {e.returncode}:{NC}")
         print(f"Command: {CYAN}{cmd_str}{NC}")
+        # Note: with capture_output=False, e.stdout and e.stderr will be None
+        # Error output will have been streamed directly to the terminal
         if e.stdout:
             print(f"{YELLOW}--- Command output ---{NC}")
             print(e.stdout)

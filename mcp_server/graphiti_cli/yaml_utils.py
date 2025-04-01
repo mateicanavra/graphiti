@@ -12,8 +12,47 @@ import os
 from typing import Optional, List, Dict, Any
 
 from .core import get_mcp_server_dir, CONTAINER_ENTITY_PATH, DEFAULT_PORT_START, DEFAULT_MCP_CONTAINER_PORT_VAR, RED, GREEN, YELLOW, CYAN, NC
+
 # Define the distinct path for project-specific entities inside the container
 PROJECT_CONTAINER_ENTITY_PATH = "/app/project_entities"
+
+# --- File and Path Constants ---
+BASE_COMPOSE_FILENAME = "base-compose.yaml"
+PROJECTS_REGISTRY_FILENAME = "mcp-projects.yaml"
+DOCKER_COMPOSE_OUTPUT_FILENAME = "docker-compose.yml"
+
+# --- YAML Key Constants ---
+# Registry file keys
+REGISTRY_PROJECTS_KEY = "projects"
+REGISTRY_ROOT_DIR_KEY = "root_dir"
+REGISTRY_CONFIG_FILE_KEY = "config_file"
+REGISTRY_ENABLED_KEY = "enabled"
+
+# Compose file keys
+COMPOSE_SERVICES_KEY = "services"
+COMPOSE_CUSTOM_BASE_ANCHOR_KEY = "x-graphiti-mcp-custom-base"
+COMPOSE_CONTAINER_NAME_KEY = "container_name"
+COMPOSE_PORTS_KEY = "ports"
+COMPOSE_ENVIRONMENT_KEY = "environment"
+COMPOSE_VOLUMES_KEY = "volumes"
+
+# Project config keys
+PROJECT_SERVICES_KEY = "services"
+PROJECT_SERVER_ID_KEY = "id"
+PROJECT_ENTITY_DIR_KEY = "entity_dir"
+PROJECT_CONTAINER_NAME_KEY = "container_name"
+PROJECT_PORT_DEFAULT_KEY = "port_default"
+PROJECT_GROUP_ID_KEY = "group_id"
+PROJECT_ENVIRONMENT_KEY = "environment"
+
+# --- Environment Variable Constants ---
+ENV_MCP_GROUP_ID = "MCP_GROUP_ID"
+ENV_MCP_USE_CUSTOM_ENTITIES = "MCP_USE_CUSTOM_ENTITIES"
+ENV_MCP_USE_CUSTOM_ENTITIES_VALUE = "true"
+ENV_MCP_ENTITY_TYPE_DIR = "MCP_ENTITY_TYPE_DIR"
+
+# --- Other Constants ---
+SERVICE_NAME_PREFIX = "mcp-"
 
 # --- YAML Instances ---
 yaml_rt = YAML()  # Round-Trip for preserving structure/comments
@@ -113,7 +152,7 @@ def update_registry_logic(
             "# Maps project names to their configuration details.",
             "# Paths should be absolute for reliability.",
         ]
-        initial_data = CommentedMap({'projects': CommentedMap()})
+        initial_data = CommentedMap({REGISTRY_PROJECTS_KEY: CommentedMap()})
         try:
             write_yaml_file(initial_data, registry_file, header=header)
         except Exception:
@@ -125,24 +164,24 @@ def update_registry_logic(
         print(f"Error: Could not load registry file {registry_file}")
         return False
 
-    if not isinstance(data, dict) or 'projects' not in data:
-        print(f"Error: Invalid registry file format in {registry_file}. Missing 'projects' key.")
+    if not isinstance(data, dict) or REGISTRY_PROJECTS_KEY not in data:
+        print(f"Error: Invalid registry file format in {registry_file}. Missing '{REGISTRY_PROJECTS_KEY}' key.")
         return False
 
     # Ensure 'projects' key exists and is a map
-    if data.get('projects') is None:
-        data['projects'] = CommentedMap()
-    elif not isinstance(data['projects'], dict):
-        print(f"Error: 'projects' key in {registry_file} is not a dictionary.")
+    if data.get(REGISTRY_PROJECTS_KEY) is None:
+        data[REGISTRY_PROJECTS_KEY] = CommentedMap()
+    elif not isinstance(data[REGISTRY_PROJECTS_KEY], dict):
+        print(f"Error: '{REGISTRY_PROJECTS_KEY}' key in {registry_file} is not a dictionary.")
         return False
 
     # Add or update the project entry (convert Paths to strings for YAML)
     project_entry = CommentedMap({
-        'root_dir': str(root_dir),
-        'config_file': str(config_file),
-        'enabled': enabled
+        REGISTRY_ROOT_DIR_KEY: str(root_dir),
+        REGISTRY_CONFIG_FILE_KEY: str(config_file),
+        REGISTRY_ENABLED_KEY: enabled
     })
-    data['projects'][project_name] = project_entry
+    data[REGISTRY_PROJECTS_KEY][project_name] = project_entry
 
     # Write back to the registry file
     try:
@@ -165,9 +204,9 @@ def generate_compose_logic(mcp_server_dir: Path):
         mcp_server_dir (Path): Path to the mcp_server directory
     """
     print("Generating docker-compose.yml...")
-    base_compose_path = mcp_server_dir / 'base-compose.yaml'
-    projects_registry_path = mcp_server_dir / 'mcp-projects.yaml'
-    output_compose_path = mcp_server_dir / 'docker-compose.yml'
+    base_compose_path = mcp_server_dir / BASE_COMPOSE_FILENAME
+    projects_registry_path = mcp_server_dir / PROJECTS_REGISTRY_FILENAME
+    output_compose_path = mcp_server_dir / DOCKER_COMPOSE_OUTPUT_FILENAME
 
     # Load base compose file
     compose_data = load_yaml_file(base_compose_path, safe=False)
@@ -175,39 +214,39 @@ def generate_compose_logic(mcp_server_dir: Path):
         print(f"Error: Failed to load or parse base compose file: {base_compose_path}")
         sys.exit(1)
 
-    if 'services' not in compose_data or not isinstance(compose_data.get('services'), dict):
-        print(f"Error: Invalid structure in '{base_compose_path}'. Missing 'services' dictionary.")
+    if COMPOSE_SERVICES_KEY not in compose_data or not isinstance(compose_data.get(COMPOSE_SERVICES_KEY), dict):
+        print(f"Error: Invalid structure in '{base_compose_path}'. Missing '{COMPOSE_SERVICES_KEY}' dictionary.")
         sys.exit(1)
 
     # Load project registry safely
     projects_registry = load_yaml_file(projects_registry_path, safe=True)
     if projects_registry is None:
         print(f"Warning: Project registry file '{projects_registry_path}' not found or failed to parse. No custom services will be added.")
-        projects_registry = {'projects': {}}
-    elif 'projects' not in projects_registry or not isinstance(projects_registry['projects'], dict):
-        print(f"Warning: Invalid format or missing 'projects' key in '{projects_registry_path}'. No custom services will be added.")
-        projects_registry = {'projects': {}}
+        projects_registry = {REGISTRY_PROJECTS_KEY: {}}
+    elif REGISTRY_PROJECTS_KEY not in projects_registry or not isinstance(projects_registry[REGISTRY_PROJECTS_KEY], dict):
+        print(f"Warning: Invalid format or missing '{REGISTRY_PROJECTS_KEY}' key in '{projects_registry_path}'. No custom services will be added.")
+        projects_registry = {REGISTRY_PROJECTS_KEY: {}}
 
     # --- Generate Custom Service Definitions ---
-    services_map = compose_data['services']  # Should be CommentedMap
+    services_map = compose_data[COMPOSE_SERVICES_KEY]  # Should be CommentedMap
 
     # Find the anchor object for merging
-    custom_base_anchor_obj = compose_data.get('x-graphiti-mcp-custom-base')
+    custom_base_anchor_obj = compose_data.get(COMPOSE_CUSTOM_BASE_ANCHOR_KEY)
     if not custom_base_anchor_obj:
-        print(f"{RED}Error: Could not find 'x-graphiti-mcp-custom-base' definition in {base_compose_path}.{NC}")
+        print(f"{RED}Error: Could not find '{COMPOSE_CUSTOM_BASE_ANCHOR_KEY}' definition in {base_compose_path}.{NC}")
         sys.exit(1)
 
     overall_service_index = 0
     # Iterate through projects from the registry
-    for project_name, project_data in projects_registry.get('projects', {}).items():
-        if not isinstance(project_data, dict) or not project_data.get('enabled', False):
+    for project_name, project_data in projects_registry.get(REGISTRY_PROJECTS_KEY, {}).items():
+        if not isinstance(project_data, dict) or not project_data.get(REGISTRY_ENABLED_KEY, False):
             continue  # Skip disabled or invalid projects
 
-        project_config_path_str = project_data.get('config_file')
-        project_root_dir_str = project_data.get('root_dir')
+        project_config_path_str = project_data.get(REGISTRY_CONFIG_FILE_KEY)
+        project_root_dir_str = project_data.get(REGISTRY_ROOT_DIR_KEY)
 
         if not project_config_path_str or not project_root_dir_str:
-            print(f"Warning: Skipping project '{project_name}' due to missing 'config_file' or 'root_dir'.")
+            print(f"Warning: Skipping project '{project_name}' due to missing '{REGISTRY_CONFIG_FILE_KEY}' or '{REGISTRY_ROOT_DIR_KEY}'.")
             continue
 
         project_config_path = Path(project_config_path_str)
@@ -219,27 +258,27 @@ def generate_compose_logic(mcp_server_dir: Path):
             print(f"Warning: Skipping project '{project_name}' because config file '{project_config_path}' could not be loaded.")
             continue
 
-        if 'services' not in project_config or not isinstance(project_config['services'], list):
-            print(f"Warning: Skipping project '{project_name}' due to missing or invalid 'services' list in '{project_config_path}'.")
+        if PROJECT_SERVICES_KEY not in project_config or not isinstance(project_config[PROJECT_SERVICES_KEY], list):
+            print(f"Warning: Skipping project '{project_name}' due to missing or invalid '{PROJECT_SERVICES_KEY}' list in '{project_config_path}'.")
             continue
 
         # Iterate through services defined in the project's config
-        for server_conf in project_config['services']:
+        for server_conf in project_config[PROJECT_SERVICES_KEY]:
             if not isinstance(server_conf, dict):
                 print(f"Warning: Skipping invalid service entry in '{project_config_path}': {server_conf}")
                 continue
 
-            server_id = server_conf.get('id')
-            entity_type_dir = server_conf.get('entity_dir')  # Relative path within project
+            server_id = server_conf.get(PROJECT_SERVER_ID_KEY)
+            entity_type_dir = server_conf.get(PROJECT_ENTITY_DIR_KEY)  # Relative path within project
 
             if not server_id or not entity_type_dir:
-                print(f"Warning: Skipping service in '{project_name}' due to missing 'id' or 'entity_dir': {server_conf}")
+                print(f"Warning: Skipping service in '{project_name}' due to missing '{PROJECT_SERVER_ID_KEY}' or '{PROJECT_ENTITY_DIR_KEY}': {server_conf}")
                 continue
 
             # --- Determine Service Configuration ---
-            service_name = f"mcp-{server_id}"
-            container_name = server_conf.get('container_name', service_name)  # Default to service_name
-            port_default = server_conf.get('port_default', DEFAULT_PORT_START + overall_service_index + 1)
+            service_name = f"{SERVICE_NAME_PREFIX}{server_id}"
+            container_name = server_conf.get(PROJECT_CONTAINER_NAME_KEY, service_name)  # Default to service_name
+            port_default = server_conf.get(PROJECT_PORT_DEFAULT_KEY, DEFAULT_PORT_START + overall_service_index + 1)
             port_mapping = f"{port_default}:${{{DEFAULT_MCP_CONTAINER_PORT_VAR}}}"  # Use f-string
 
             # --- Build Service Definition using CommentedMap ---
@@ -247,14 +286,14 @@ def generate_compose_logic(mcp_server_dir: Path):
             # Add the merge key first using the anchor object
             new_service.add_yaml_merge([(0, custom_base_anchor_obj)])  # Merge base config
 
-            new_service['container_name'] = container_name
-            new_service['ports'] = [port_mapping]  # Ports must be a list
+            new_service[COMPOSE_CONTAINER_NAME_KEY] = container_name
+            new_service[COMPOSE_PORTS_KEY] = [port_mapping]  # Ports must be a list
 
             # --- Environment Variables ---
             env_vars = CommentedMap()  # Use CommentedMap to preserve order if needed
-            mcp_group_id = server_conf.get('group_id', project_name)  # Default group_id to project_name
-            env_vars['MCP_GROUP_ID'] = mcp_group_id
-            env_vars['MCP_USE_CUSTOM_ENTITIES'] = 'true'  # Assume true if defined here
+            mcp_group_id = server_conf.get(PROJECT_GROUP_ID_KEY, project_name)  # Default group_id to project_name
+            env_vars[ENV_MCP_GROUP_ID] = mcp_group_id
+            env_vars[ENV_MCP_USE_CUSTOM_ENTITIES] = ENV_MCP_USE_CUSTOM_ENTITIES_VALUE  # Assume true if defined here
 
             # Calculate absolute host path for entity volume mount
             abs_host_entity_path = (project_root_dir / entity_type_dir).resolve()
@@ -263,28 +302,28 @@ def generate_compose_logic(mcp_server_dir: Path):
                 # Continue anyway, Docker will create an empty dir inside container if host path doesn't exist
 
             # Set container path for entity directory env var
-            env_vars['MCP_ENTITY_TYPE_DIR'] = PROJECT_CONTAINER_ENTITY_PATH
+            env_vars[ENV_MCP_ENTITY_TYPE_DIR] = PROJECT_CONTAINER_ENTITY_PATH
 
             # Add project-specific environment variables from mcp-config.yaml
-            project_environment = server_conf.get('environment', {})
+            project_environment = server_conf.get(PROJECT_ENVIRONMENT_KEY, {})
             if isinstance(project_environment, dict):
                 env_vars.update(project_environment)
             else:
-                print(f"Warning: Invalid 'environment' section for service '{service_name}' in '{project_config_path}'. Expected a dictionary.")
+                print(f"Warning: Invalid '{PROJECT_ENVIRONMENT_KEY}' section for service '{service_name}' in '{project_config_path}'. Expected a dictionary.")
 
-            new_service['environment'] = env_vars
+            new_service[COMPOSE_ENVIRONMENT_KEY] = env_vars
 
             # --- Volumes ---
             # Ensure volumes list exists (might be added by anchor merge, check needed?)
             # setdefault is safer if anchor doesn't guarantee 'volumes'
-            if 'volumes' not in new_service:
-                new_service['volumes'] = []
-            elif not isinstance(new_service['volumes'], list):
-                print(f"Warning: 'volumes' merged from anchor for service '{service_name}' is not a list. Overwriting.")
-                new_service['volumes'] = []
+            if COMPOSE_VOLUMES_KEY not in new_service:
+                new_service[COMPOSE_VOLUMES_KEY] = []
+            elif not isinstance(new_service[COMPOSE_VOLUMES_KEY], list):
+                print(f"Warning: '{COMPOSE_VOLUMES_KEY}' merged from anchor for service '{service_name}' is not a list. Overwriting.")
+                new_service[COMPOSE_VOLUMES_KEY] = []
 
             # Append the entity volume mount (read-only)
-            new_service['volumes'].append(f"{abs_host_entity_path}:{PROJECT_CONTAINER_ENTITY_PATH}:ro")
+            new_service[COMPOSE_VOLUMES_KEY].append(f"{abs_host_entity_path}:{PROJECT_CONTAINER_ENTITY_PATH}:ro")
 
             # --- Add to Services Map ---
             services_map[service_name] = new_service
