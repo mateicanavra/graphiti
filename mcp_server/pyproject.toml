@@ -12,4 +12,18 @@ dependencies = [
     # For production/normal use (uncomment this and comment out the above):
     "graphiti-core>=0.8.5",
     "ruamel.yaml>=0.17.21",
+    "typer[all]>=0.9.0",
+    "python-dotenv>=1.0.0",
 ]
+
+[project.scripts]
+graphiti = "graphiti_cli.main:app"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+# Explicitly specify packages to include
+[tool.setuptools.packages.find]
+include = ["graphiti_cli*"]
+exclude = ["entity_types*", "rules*", "llm_cache*"]
