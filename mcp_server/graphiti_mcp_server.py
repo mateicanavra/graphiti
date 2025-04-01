@@ -856,16 +856,30 @@ async def initialize_server() -> MCPConfig:
         config.group_id = f'graph_{uuid.uuid4().hex[:8]}'
         logger.info(f'Generated random group_id: {config.group_id}')
 
-    # Load custom entity types if directory is specified
+    # Define the expected path for base entity types within the container
+    container_base_entity_dir = "/app/entity_types/base"
+    
+    # Always load base entity types first
+    if os.path.exists(container_base_entity_dir) and os.path.isdir(container_base_entity_dir):
+        logger.info(f'Loading base entity types from: {container_base_entity_dir}')
+        load_entity_types_from_directory(container_base_entity_dir)
+    else:
+        logger.warning(f"Base entity types directory not found at: {container_base_entity_dir}")
+    
+    # Load project-specific entity types if directory is specified and different from base
     if args.entity_type_dir:
-        logger.info(f'Loading custom entity types from: {args.entity_type_dir}')
-        load_entity_types_from_directory(args.entity_type_dir)
+        # Resolve paths to handle potential symlinks or relative paths inside container
+        abs_project_dir = os.path.abspath(args.entity_type_dir)
+        abs_base_dir = os.path.abspath(container_base_entity_dir)
         
-    # Always load built-in entity types from entity_types/base
-    base_dir = os.path.join(os.path.dirname(__file__), 'entity_types/base')
-    if os.path.exists(base_dir):
-        logger.info('Loading built-in entity types')
-        load_entity_types_from_directory(base_dir)
+        if abs_project_dir != abs_base_dir:
+            if os.path.exists(abs_project_dir) and os.path.isdir(abs_project_dir):
+                logger.info(f'Loading project-specific entity types from: {abs_project_dir}')
+                load_entity_types_from_directory(abs_project_dir)
+            else:
+                logger.warning(f"Project entity types directory not found or not a directory: {abs_project_dir}")
+        else:
+            logger.info(f"Project entity directory '{args.entity_type_dir}' is the same as base, skipping redundant load.")
 
     # Set use_custom_entities flag if specified
     if args.use_custom_entities:

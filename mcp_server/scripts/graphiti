@@ -15,21 +15,17 @@ usage() {
   echo -e "${BOLD}Usage:${NC} graphiti [-h|--help] [COMMAND] [ARGS...]"
   echo
   echo -e "${BOLD}Commands:${NC}"
-  echo -e "  ${CYAN}init${NC} PROJECT_NAME [DIR]        Initialize a project: run link and rules."
+  echo -e "  ${CYAN}init${NC} PROJECT_NAME [DIR]        Initialize a project: create config and entities directory, and set up rules."
   echo -e "  ${CYAN}entity${NC} SET_NAME                Create a new entity type set with an example entity in the mcp-graphiti repo."
   echo -e "  ${CYAN}rules${NC} PROJECT_NAME [DIR]       Setup Cursor rules (.mdc files) for Graphiti in a target project directory."
-  echo -e "  ${CYAN}link${NC} [DIR]                     (Default if no command) Create dev symlinks (entity_types, docker-compose.yml)."
   echo -e "  ${CYAN}up${NC} [-d] [--log-level LEVEL]    Start all containers using docker compose. Use -d for detached mode."
   echo -e "  ${CYAN}down${NC} [--log-level LEVEL]       Stop and remove all containers using docker compose."
   echo -e "  ${CYAN}restart${NC} [--log-level LEVEL]    Restart all containers: runs 'down' followed by 'up'."
-  echo -e "  ${CYAN}compose${NC}                        Generate docker-compose.yml file from base-compose.yaml and custom_servers.yaml."
+  echo -e "  ${CYAN}compose${NC}                        Generate docker-compose.yml file from base-compose.yaml and mcp-projects.yaml."
   echo
   echo -e "${BOLD}Arguments for init & rules:${NC}"
   echo -e "  ${BOLD}PROJECT_NAME${NC}  Name of the target project (used for schema filename)."
   echo -e "  ${BOLD}DIR${NC}           Optional. Target project root directory. Defaults to current directory (.)."
-  echo
-  echo -e "${BOLD}Arguments for link:${NC}"
-  echo -e "  ${BOLD}DIR${NC}           Optional. Target directory for dev links. Defaults to current directory (.)."
   echo
   echo -e "${BOLD}Options:${NC}"
   echo -e "  ${BOLD}-h, --help${NC}                Show this help message and exit."
@@ -58,27 +54,6 @@ set_name_to_class_name() {
   
   # Add "Entity" suffix
   echo "${class_name}Entity"
-}
-
-# --- Helper Function for Linking Dev Files ---
-_link_dev_files() {
-  local TARGET_DIR="${1:-.}" # Default to current directory if not provided
-  mkdir -p "$TARGET_DIR" # Ensure target directory exists
-
-  # Define Source and Target Paths for dev links
-  local SOURCE_ENTITY_TYPES="$SOURCE_SERVER_DIR/entity_types"
-  local TARGET_ENTITY_TYPES="$TARGET_DIR/entity_types"
-  local SOURCE_DOCKER_COMPOSE="$SOURCE_SERVER_DIR/docker-compose.yml"
-  local TARGET_DOCKER_COMPOSE="$TARGET_DIR/docker-compose.yml"
-
-  # Create/Update Symlinks for dev files
-  echo -e "Linking entity types to ${CYAN}$TARGET_ENTITY_TYPES${NC}"
-  ln -sf "$SOURCE_ENTITY_TYPES" "$TARGET_ENTITY_TYPES"
-
-  echo -e "Linking docker-compose.yml to ${CYAN}$TARGET_DOCKER_COMPOSE${NC}"
-  ln -sf "$SOURCE_DOCKER_COMPOSE" "$TARGET_DOCKER_COMPOSE"
-
-  echo -e "${GREEN}Graphiti dev links created successfully in $TARGET_DIR.${NC}"
 }
 
 # --- Helper Function for Setting Up Rules ---
@@ -155,7 +130,7 @@ _ensure_docker_compose_file() {
   
   # Run the generation script
   echo -e "Generating docker-compose.yml from templates..."
-  python generate_compose.py > /dev/null 2>&1
+  "./generate_compose.py" > /dev/null 2>&1
   local RESULT=$?
   
   if [ $RESULT -ne 0 ]; then
@@ -381,8 +356,14 @@ if [ ! -d "$SOURCE_SERVER_DIR" ]; then
 fi
 
 # 2. Parse command and arguments
-COMMAND="${1:-link}" # Default to link if no command provided
+COMMAND="${1}" # No default command
 shift || true # Shift arguments even if $1 was empty (no command given). Use || true to prevent exit on error if no args.
+
+# If no command is provided, show usage
+if [ -z "$COMMAND" ]; then
+  echo -e "${YELLOW}No command specified.${NC}"
+  usage
+fi
 
 # Handle commands using if/elif/else structure
 if [[ "$COMMAND" == "init" ]]; then
@@ -397,9 +378,46 @@ if [[ "$COMMAND" == "init" ]]; then
 
   echo -e "Initializing Graphiti project '${CYAN}$PROJECT_NAME${NC}' in '${CYAN}$TARGET_DIR${NC}'..."
 
-  # Call the helper functions
-  _link_dev_files "$TARGET_DIR"
+  # Create template mcp-config.yaml in the target directory
+  cat > "$TARGET_DIR/mcp-config.yaml" << EOF
+# Configuration for project: $PROJECT_NAME
+services:
+  - id: ${PROJECT_NAME}-main # Service ID (used for default naming)
+    # container_name: "custom-name" # Optional: Specify custom container name
+    # port_default: 8001           # Optional: Specify custom host port
+    group_id: "$PROJECT_NAME"     # Graph group ID
+    entity_dir: "entities"       # Relative path to entity definitions within project
+    # environment:                 # Optional: Add non-secret env vars here
+    #   MY_FLAG: "true"
+EOF
+  echo -e "Created template ${CYAN}$TARGET_DIR/mcp-config.yaml${NC}"
+
+  # Create entities directory
+  mkdir -p "$TARGET_DIR/entities"
+  touch "$TARGET_DIR/entities/.gitkeep"
+  echo -e "Created entities directory: ${CYAN}$TARGET_DIR/entities${NC}"
+
+  # Set up rules
   _setup_rules "$PROJECT_NAME" "$TARGET_DIR"
+
+  # Update central registry
+  # Get absolute paths
+  ABS_TARGET_DIR=$(cd "$TARGET_DIR" && pwd)
+  ABS_CONFIG_PATH="$ABS_TARGET_DIR/mcp-config.yaml"
+  CENTRAL_REGISTRY_PATH="$SOURCE_SERVER_DIR/mcp-projects.yaml"
+  
+  echo -e "Updating central project registry: ${CYAN}$CENTRAL_REGISTRY_PATH${NC}"
+  "$SOURCE_SERVER_DIR/scripts/_yaml_helper.py" update-registry \
+    --registry-file "$CENTRAL_REGISTRY_PATH" \
+    --project-name "$PROJECT_NAME" \
+    --root-dir "$ABS_TARGET_DIR" \
+    --config-file "$ABS_CONFIG_PATH"
+  
+  # Check exit code from the Python script
+  if [ $? -ne 0 ]; then
+    echo -e "${RED}Error: Failed to update project registry.${NC}"
+    exit 1
+  fi
 
   echo -e "${GREEN}Graphiti project '$PROJECT_NAME' initialization complete.${NC}"
   exit 0
@@ -685,14 +703,6 @@ elif [[ "$COMMAND" == "rules" ]]; then
   _setup_rules "$PROJECT_NAME" "$TARGET_DIR"
   exit 0
 
-elif [[ "$COMMAND" == "link" ]]; then
-  # Determine Target Directory for dev links
-  TARGET_DIR="${1:-.}" # Use first arg after 'link' or default to '.' if no command/args
-
-  # Call the helper function
-  _link_dev_files "$TARGET_DIR"
-  exit 0
-
 elif [[ "$COMMAND" == "compose" ]]; then
   # We need to run generate_compose.py from the mcp_server directory
   MCP_SERVER_DIR="$MCP_GRAPHITI_REPO_PATH/mcp_server"
@@ -712,7 +722,7 @@ elif [[ "$COMMAND" == "compose" ]]; then
   cd "$MCP_SERVER_DIR"
   
   # Run the generation script
-  python generate_compose.py
+  "./generate_compose.py"
   RESULT=$?
   
   # Check the result and provide appropriate feedback
@@ -728,6 +738,6 @@ elif [[ "$COMMAND" == "compose" ]]; then
   exit $RESULT
 
 else
-  echo "Error: Unknown command '$COMMAND'"
+  echo -e "${RED}Error: Unknown command '$COMMAND'${NC}"
   usage
 fi 

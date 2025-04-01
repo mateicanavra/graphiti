@@ -19,6 +19,8 @@ OUTPUT_COMPOSE_FILE = 'docker-compose.yml'
 DEFAULT_MCP_CONTAINER_PORT_VAR = "MCP_ROOT_CONTAINER_PORT:-8000"
 # Starting port number for default calculation
 DEFAULT_PORT_START = 8000
+# Path inside container where project entities will be mounted
+CONTAINER_ENTITY_PATH = "/app/project_entities"
 
 # --- Initialize ruamel.yaml ---
 # Use the round-trip loader/dumper to preserve structure
@@ -149,9 +151,6 @@ for project_name, project_data in projects_registry.get('projects', {}).items():
         
         # Calculate absolute path for entity directory
         abs_host_entity_path = os.path.abspath(os.path.join(project_root_dir, entity_type_dir))
-        
-        # Define container entity path constant
-        CONTAINER_ENTITY_PATH = "/app/project_entities"
         
         # Add volume mount for entity directory
         new_service.setdefault('volumes', []).append(f"{abs_host_entity_path}:{CONTAINER_ENTITY_PATH}:ro")

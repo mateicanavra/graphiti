@@ -8,7 +8,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
 
 **Phase 1: Foundational Changes (Central Repo: `mcp-server`)**
 
-**Step 1.1: Create Project Registry File**
+**Step 1.1: Create Project Registry File** [COMPLETED]
 
 *   **Objective:** Establish the central registry file.
 *   **File:** `mcp-server/mcp-projects.yaml`
@@ -28,7 +28,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
     ```
 *   **Acceptance Criteria:** The file `mcp-server/mcp-projects.yaml` exists with the specified structure and comments.
 
-**Step 1.2: Enhance Generator (`generate_compose.py`) - Load Registry & Modify Loop**
+**Step 1.2: Enhance Generator (`generate_compose.py`) - Load Registry & Modify Loop** [COMPLETED]
 
 *   **Objective:** Update the generator to read the new registry instead of `custom_servers.yaml`.
 *   **File:** `mcp-server/generate_compose.py`
@@ -56,7 +56,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
     *   It then iterates through the `services` defined within that project configuration.
     *   The old `custom_servers.yaml` logic is removed.
 
-**Step 1.3: Enhance Generator (`generate_compose.py`) - Resolve Paths & Add Volumes**
+**Step 1.3: Enhance Generator (`generate_compose.py`) - Resolve Paths & Add Volumes** [COMPLETED]
 
 *   **Objective:** Calculate absolute entity paths and add volume mounts to service definitions.
 *   **File:** `mcp-server/generate_compose.py`
@@ -72,7 +72,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
     *   The generator calculates the absolute path on the host for the project's entity directory.
     *   A `volumes` section is added/appended to each generated custom service definition, mapping the host path to `/app/project_entities` (read-only).
 
-**Step 1.4: Enhance Generator (`generate_compose.py`) - Update Environment Variables**
+**Step 1.4: Enhance Generator (`generate_compose.py`) - Update Environment Variables** [COMPLETED]
 
 *   **Objective:** Set `MCP_ENTITY_TYPE_DIR` correctly and merge project-specific environment variables.
 *   **File:** `mcp-server/generate_compose.py`
@@ -87,7 +87,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
     *   Any key-value pairs defined under the `environment:` key in the project's `mcp-config.yaml` are added to the service's environment definition.
     *   The logic for the `types` key (and `MCP_ENTITY_TYPES` env var) is removed (or confirmed working if kept).
 
-**Step 1.5: Enhance Generator (`generate_compose.py`) - Update Port/Container Name Logic**
+**Step 1.5: Enhance Generator (`generate_compose.py`) - Update Port/Container Name Logic** [COMPLETED]
 
 *   **Objective:** Source ports and container names directly from project config or generator defaults.
 *   **File:** `mcp-server/generate_compose.py`
@@ -107,7 +107,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
     *   Ports are assigned based on `port_default` in project config, or sequentially otherwise.
     *   Container names are assigned based on `container_name` in project config, or derived from the service `id` otherwise.
 
-**Step 1.6: Enhance Generator (`generate_compose.py`) - Ensure Base Merge**
+**Step 1.6: Enhance Generator (`generate_compose.py`) - Ensure Base Merge** [COMPLETED]
 
 *   **Objective:** Verify that shared configurations are still inherited correctly.
 *   **File:** `mcp-server/generate_compose.py`
@@ -115,7 +115,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
     1.  Confirm the line `new_service.add_yaml_merge([(0, custom_base_anchor_obj)])` (@LINE:126) is still present within the inner service loop and functions as expected.
 *   **Acceptance Criteria:** Generated custom services in `docker-compose.yml` contain `<<: *graphiti-mcp-custom-base`.
 
-**Step 1.7: Adapt Server Script (`graphiti_mcp_server.py`) - Entity Loading**
+**Step 1.7: Adapt Server Script (`graphiti_mcp_server.py`) - Entity Loading** [COMPLETED]
 
 *   **Objective:** Enable loading of both base and project-specific entity types.
 *   **File:** `mcp-server/graphiti_mcp_server.py`
@@ -152,7 +152,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
     *   If a custom service container has a volume mounted at `/app/project_entities` and `MCP_ENTITY_TYPE_DIR` set to that path, the server logs attempts to load entities from that directory as well.
     *   The final list of registered entities includes both base and project-specific types.
 
-**Step 1.8: Verify Dockerfile**
+**Step 1.8: Verify Dockerfile** [COMPLETED]
 
 *   **Objective:** Confirm base entities are copied into the image.
 *   **File:** `Dockerfile` (provided in clipboard)
@@ -164,7 +164,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
 
 **Phase 2: CLI and Project Workflow**
 
-**Step 2.1: Create YAML Helper Script (Optional but Recommended)**
+**Step 2.1: Create YAML Helper Script (Optional but Recommended)** [COMPLETED]
 
 *   **Objective:** Provide a robust way for the bash `graphiti` script to modify `mcp-projects.yaml`.
 *   **File:** `mcp-server/scripts/_yaml_helper.py` (New File)
@@ -179,7 +179,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
     4.  Include error handling (file not found, parsing errors, key errors).
 *   **Acceptance Criteria:** A Python script exists that can reliably add/update project entries in `mcp-projects.yaml` via command-line arguments.
 
-**Step 2.2: Enhance CLI (`scripts/graphiti`) - `init` Command**
+**Step 2.2: Enhance CLI (`scripts/graphiti`) - `init` Command** [COMPLETED]
 
 *   **Objective:** Automate project setup and registration in `mcp-projects.yaml`.
 *   **File:** `mcp-server/scripts/graphiti`
@@ -226,7 +226,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
     *   It correctly calls the YAML helper script (or other method) to add/update the project entry in `mcp-projects.yaml` with absolute paths.
     *   The obsolete linking step is removed.
 
-**Step 2.3: Enhance CLI (`scripts/graphiti`) - Update Compose/Run Commands**
+**Step 2.3: Enhance CLI (`scripts/graphiti`) - Update Compose/Run Commands** [COMPLETED]
 
 *   **Objective:** Ensure Docker Compose commands use the centrally generated file correctly.
 *   **File:** `mcp-server/scripts/graphiti`
@@ -235,7 +235,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
     2.  Verify the `up`, `down`, `restart` commands (@LINE:400, @LINE:471, @LINE:536) correctly `cd` to `$MCP_SERVER_DIR`, call `_ensure_docker_compose_file` (which runs the generator), and then execute `docker compose ...`.
 *   **Acceptance Criteria:** The `compose`, `up`, `down`, `restart` commands function correctly with the new generator logic, operating within the central `mcp-server` directory.
 
-**Step 2.4: Enhance CLI (`scripts/graphiti`) - Remove `link` Command**
+**Step 2.4: Enhance CLI (`scripts/graphiti`) - Remove `link` Command** [COMPLETED]
 
 *   **Objective:** Remove the obsolete symlinking functionality.
 *   **File:** `mcp-server/scripts/graphiti`
@@ -263,7 +263,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
 
 **Phase 3: Testing and Documentation**
 
-**Step 3.1: Create Sample Projects**
+**Step 3.1: Create Sample Projects** [COMPLETED]
 
 *   **Objective:** Set up test projects to validate the new workflow.
 *   **Actions:**
@@ -298,7 +298,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
             ```
 *   **Acceptance Criteria:** Two distinct project directories exist, each containing a basic entity definition and an `mcp-config.yaml` file defining at least one service.
 
-**Step 3.2: Test `graphiti init`**
+**Step 3.2: Test `graphiti init`** [COMPLETED]
 
 *   **Objective:** Verify project initialization and registry update.
 *   **Actions:**
@@ -310,7 +310,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
     6.  Repeat steps 1-5 for `test-project-2`.
 *   **Acceptance Criteria:** Both test projects are successfully registered in `mcp-projects.yaml` with correct absolute paths. Rules directories are created.
 
-**Step 3.3: Test `graphiti compose`**
+**Step 3.3: Test `graphiti compose`** [COMPLETED]
 
 *   **Objective:** Verify correct generation of the combined `docker-compose.yml`.
 *   **Actions:**
@@ -331,7 +331,7 @@ Okay, here is the detailed, step-by-step implementation plan based on the "Centr
             *   Has `environment` including `MCP_GROUP_ID: "test-project-2"`, `MCP_ENTITY_TYPE_DIR: "/app/project_entities"`, `TEST_PROJECT_FLAG: "Project2"`, `ANOTHER_FLAG: "enabled"`, and inherited base env vars.
 *   **Acceptance Criteria:** The generated `docker-compose.yml` accurately reflects the combination of `base-compose.yaml` and the configurations from both registered test projects.
 
-**Step 3.4: Test `graphiti up`/`down`/`restart`**
+**Step 3.4: Test `graphiti up`/`down`/`restart`** [COMPLETED]
 
 *   **Objective:** Verify the full stack runs correctly.
 *   **Actions:**
